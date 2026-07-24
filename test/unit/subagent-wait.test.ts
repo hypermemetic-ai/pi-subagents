@@ -537,6 +537,32 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("does not reconcile unrelated runs when waiting for an exact id", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-exact-id-scan-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "target-run", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStatus(asyncRoot, "other-run-a", "running", { sessionId: "sess-1", pid: 999998 });
+			writeStatus(asyncRoot, "other-run-b", "running", { sessionId: "sess-1", pid: 999997 });
+
+			let probes = 0;
+			const result = await waitForSubagents({ id: "target-run" }, undefined, baseDeps(root, state, {
+				kill: () => {
+					probes++;
+					return true;
+				},
+				sleep: async () => writeStatus(asyncRoot, "target-run", "complete", { sessionId: "sess-1" }),
+			}));
+
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /run "target-run".*done/is);
+			assert.equal(probes, 1, "exact-id waits should reconcile only the selected run");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("times out while runs are still active and reports them", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-timeout-"));
 		try {
