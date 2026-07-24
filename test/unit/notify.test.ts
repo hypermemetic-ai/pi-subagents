@@ -388,6 +388,33 @@ describe("registerSubagentNotify", () => {
 });
 
 describe("completion formatting helpers", () => {
+	it("formats and parses a parallel handoff without folding it into the result preview", () => {
+		const content = formatSingleCompletion({
+			agent: "worker",
+			status: "completed",
+			resultPreview: "Done",
+			handoffPath: "/tmp/run/handoff.json",
+			sessionLabel: "Session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(content, "Background task completed: **worker**\n\nDone\n\nParallel handoff: /tmp/run/handoff.json\n\nSession file: /tmp/session.jsonl");
+		assert.deepEqual(parseSubagentNotifyContent(content), {
+			agent: "worker",
+			status: "completed",
+			resultPreview: "Done",
+			handoffPath: "/tmp/run/handoff.json",
+			sessionLabel: "session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(buildCompletionDetails({
+			id: "run",
+			agent: "worker",
+			success: true,
+			summary: "Done",
+			parallelHandoff: { path: "/tmp/run/handoff.json" },
+		}).handoffPath, "/tmp/run/handoff.json");
+	});
+
 	it("formatSingleCompletion mirrors the in-handler single message shape", () => {
 		const content = formatSingleCompletion({
 			agent: "worker",

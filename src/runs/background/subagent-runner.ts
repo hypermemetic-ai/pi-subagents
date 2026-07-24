@@ -99,6 +99,7 @@ import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, turnBudgetDecision, turnBudgetDeferredNote, turnBudgetDeferredState, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
+import { formatParallelHandoffError, formatParallelHandoffReference, parallelHandoffPath, writeParallelHandoffGroup } from "../shared/parallel-handoff.ts";
 import { resolveWatchdogConfig } from "../../watchdog/settings.ts";
 import { createBoundedByteTail, createBoundedLineReader, formatProtocolOutputLimit, MAX_CHILD_STDERR_BYTES, projectChildLifecycle, type ChildLifecycleAction, type ProtocolOutputLimit } from "../shared/child-protocol.ts";
 import { acquireSessionLease, type SessionLeaseRequest } from "../shared/session-lease.ts";
@@ -1544,19 +1545,15 @@ function prepareParallelTaskRun(
 	};
 }
 
-function appendParallelWorktreeSummary(
-	previousOutput: string,
-	worktreeSetup: WorktreeSetup | undefined,
+function captureParallelWorktreeDiffs(
+	worktreeSetup: WorktreeSetup,
 	asyncDir: string,
 	stepIndex: number,
 	group: Extract<RunnerStep, { parallel: SubagentStep[] }>,
-): string {
-	if (!worktreeSetup) return previousOutput;
+): { diffs: ReturnType<typeof diffWorktrees>; summary: string } {
 	const diffsDir = path.join(asyncDir, "worktree-diffs", `step-${stepIndex}`);
 	const diffs = diffWorktrees(worktreeSetup, group.parallel.map((task) => task.agent), diffsDir);
-	const diffSummary = formatWorktreeDiffSummary(diffs);
-	if (!diffSummary) return previousOutput;
-	return `${previousOutput}\n\n${diffSummary}`;
+	return { diffs, summary: formatWorktreeDiffSummary(diffs) };
 }
 
 function ensureParallelProgressFile(cwd: string, group: Extract<RunnerStep, { parallel: SubagentStep[] }>): void {
@@ -3131,6 +3128,7 @@ async function runSubagent(
 			const groupStartFlatIndex = flatIndex;
 			let aborted = false;
 			let worktreeSetup: WorktreeSetup | undefined;
+			let worktreeFinalized = false;
 			if (group.worktree) {
 				const worktreeTaskCwdConflict = findWorktreeTaskCwdConflict(group.parallel, cwd);
 				if (worktreeTaskCwdConflict) {
@@ -3421,7 +3419,39 @@ async function runSubagent(
 						attemptedModels: r.attemptedModels,
 					})),
 				);
-				previousOutput = appendParallelWorktreeSummary(previousOutput, worktreeSetup, asyncDir, stepIndex, group);
+				if (worktreeSetup) {
+					const captured = captureParallelWorktreeDiffs(worktreeSetup, asyncDir, stepIndex, group);
+					if (captured.summary) previousOutput = `${previousOutput}\n\n${captured.summary}`;
+					worktreeFinalized = true;
+					const cleanup = cleanupWorktrees(worktreeSetup);
+					try {
+						statusPayload.parallelHandoff = writeParallelHandoffGroup({
+							manifestPath: parallelHandoffPath(asyncDir),
+							runId: id,
+							mode: (config.resultMode ?? statusPayload.mode) === "parallel" ? "parallel" : "chain",
+							source: "async",
+							cwd,
+							stepIndex,
+							flatStartIndex: groupStartFlatIndex,
+							setup: worktreeSetup,
+							diffs: captured.diffs,
+							cleanup,
+							results: parallelResults.map((result) => ({
+								agent: result.agent,
+								status: result.stopped ? "stopped" : result.interrupted ? "paused" : result.exitCode === 0 ? "completed" : "failed",
+								summary: result.output || result.error || "(no output)",
+								...(result.artifactPaths?.outputPath ? { outputPath: result.artifactPaths.outputPath } : {}),
+								...(result.structuredOutput !== undefined ? { structuredOutput: result.structuredOutput } : {}),
+								...(result.structuredOutputPath ? { structuredOutputPath: result.structuredOutputPath } : {}),
+								...(result.sessionFile ? { sessionPath: result.sessionFile } : {}),
+							})),
+						});
+						previousOutput = `${previousOutput}\n\n${formatParallelHandoffReference(statusPayload.parallelHandoff)}`;
+					} catch (error) {
+						previousOutput = `${previousOutput}\n\n${formatParallelHandoffError(error)}`;
+					}
+					writeStatusPayload();
+				}
 
 				appendJsonl(eventsPath, JSON.stringify({
 					type: "subagent.parallel.completed",
@@ -3444,7 +3474,7 @@ async function runSubagent(
 					break;
 				}
 			} finally {
-				if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+				if (worktreeSetup && !worktreeFinalized) cleanupWorktrees(worktreeSetup);
 			}
 		} else {
 			const seqStep = step as SubagentStep;
@@ -3845,6 +3875,7 @@ async function runSubagent(
 			})),
 			outputs,
 			workflowGraph: statusPayload.workflowGraph,
+			parallelHandoff: statusPayload.parallelHandoff,
 			exitCode: stopped || timedOut || turnBudgetExceeded ? 1 : interrupted || results.every((r) => r.success) ? 0 : 1,
 			timestamp: runEndedAt,
 			durationMs: runEndedAt - overallStartTime,

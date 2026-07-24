@@ -244,9 +244,11 @@ To keep subagents inside a budget or compliance profile, enforce a model scope. 
 
 Foreground runs stream progress in the conversation while they run.
 
-Background runs keep working after control returns to you. Inspect active runs with `subagent({ action: "status" })`, or a specific run with `subagent({ action: "status", id: "..." })`. `/subagents-fleet` opens a live, inspection-only fleet with current-session foreground work, recent async children, transcript tails, and completed output/session paths. Use `↑`/`↓` or `j`/`k` to select a child, `PgUp`/`PgDn` to scroll its transcript, `r` to refresh immediately, and `Esc` to close. `Ctrl+Alt+F` opens the same inspector even while a foreground turn is active and slash input is queued. Without a TUI, `/subagents-fleet` retains the textual `subagent({ action: "status", view: "fleet" })` fallback. Mutations stay in explicit commands: run `/subagents-stop` and pick from the selector, or use `/subagents-stop <run-id>` / `subagent({ action: "stop", id: "..." })` when you already know the id. To inspect one background child in text, use `subagent({ action: "status", id: "...", view: "transcript" })`; add `index` for a specific child in a parallel or chain run.
+Background runs keep working after control returns to you. Inspect active runs with `subagent({ action: "status" })`, or a specific run with `subagent({ action: "status", id: "..." })`. In the TUI, a persistent FleetView below the editor shows `main` plus active children with task, elapsed time, and token totals. When the focused editor is empty, use `↑`/`↓` or `j`/`k` to select a child and `Enter` to inspect it; normal editor input is never intercepted.
 
-They also show a compact async widget and send completion notifications. Parallel background runs show per-agent progress instead of fake chain steps. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
+`/subagents-fleet` opens the live, inspection-only fleet inspector with current-session foreground work, recent async children, structured Markdown/tool transcripts, and completed output/session paths. Use `↑`/`↓` or `j`/`k` to select a child, `Shift+K`/`Shift+J` to scroll one line, `PgUp`/`PgDn` to scroll one page, `x`/`Ctrl+O` to toggle tool details, `r` to refresh, and `Esc` to close. `Ctrl+Alt+F` opens the same inspector even while a foreground turn is active and slash input is queued. Without a TUI, `/subagents-fleet` retains the textual `subagent({ action: "status", view: "fleet" })` fallback. Mutations stay in explicit commands: run `/subagents-stop` and pick from the selector, or use `/subagents-stop <run-id>` / `subagent({ action: "stop", id: "..." })` when you already know the id. To inspect one background child in text, use `subagent({ action: "status", id: "...", view: "transcript" })`; add `index` for a specific child in a parallel or chain run.
+
+FleetView replaces the legacy above-editor async widget by default, while completion notifications remain enabled. Parallel runs show every active child independently. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
 
 You can also ask naturally:
 
@@ -260,7 +262,7 @@ Foreground and async runners share bounded child-protocol handling. A child JSON
 
 The stable v1 status/result fields are `lifecycleArtifactVersion`, `runId`/`id`, `sessionId`, `mode`, `state`, `startedAt`, `lastUpdate`, `endedAt`, `durationMs`, `cwd`, `asyncDir`, `sessionFile`, `outputFile`, `workflowGraph`, `steps`, `results`, `totalTokens`, `totalCost`, `model`/`attemptedModels`/`modelAttempts`, `toolCount`, `turnCount`, and nested `children` when a child is allowed to launch subagents. `events.jsonl` records lifecycle transitions such as `subagent.run.started`, `subagent.step.started`, `subagent.step.completed`/`failed`/`paused`/`stopped`, control attention events, nested interrupt failures, and `subagent.run.completed`/`stopped`; run boundary events include the lifecycle artifact version. Consumers should read these JSON files instead of scraping terminal output; unknown fields and event types should be ignored for forward compatibility.
 
-Other Pi extensions can use the versioned in-process event-bus RPC instead of scraping slash output or calling internal modules. Listen for `subagents:rpc:v1:ready`, send requests on `subagents:rpc:v1:request`, and read replies from `subagents:rpc:v1:reply:<requestId>`.
+Other Pi extensions can use the versioned in-process event-bus RPC instead of scraping slash output or calling internal modules. Listen for `subagents:rpc:v1:ready`, send requests on `subagents:rpc:v1:request`, and read replies from `subagents:rpc:v1:reply:<requestId>`. The `ping` capability metadata also advertises `events.asyncComplete` for exact process-local completion correlation after RPC `spawn`.
 
 ```typescript
 const requestId = crypto.randomUUID();
@@ -276,7 +278,7 @@ pi.events.emit("subagents:rpc:v1:request", {
 });
 ```
 
-The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, omit `clarify` or set `clarify: false`, and do not pass management `action` values. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, configured spawn caps, child-safety depth, artifacts, and async status all behave the same. `stop` targets current-session top-level async runs through the stop control channel and records a `stopped` lifecycle instead of reporting a timeout.
+The v1 methods are `ping`, `status`, `spawn`, `steer`, `interrupt`, and `stop`. `status`, `steer`, and `interrupt` reuse the normal control actions. `steer` requires an async run `id` (plus optional child `index`) and a non-empty `message`; its reply preserves the normal acknowledged-delivery result. RPC steering disables the direct tool's pause-and-revive recovery so an extension keeps authority over the exact child it spawned; `ping.capabilities.nonRecoveringSteer` advertises this guarantee. `spawn` is async-only: omit `async` or set `async: true`, omit `clarify` or set `clarify: false`, and do not pass management `action` values. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, configured spawn caps, child-safety depth, artifacts, and async status all behave the same. `stop` targets current-session top-level async runs through the stop control channel and records a `stopped` lifecycle instead of reporting a timeout.
 
 `pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the file lifecycle artifacts or `pi-intercom` for cross-process coordination.
 
@@ -982,7 +984,12 @@ If you are writing an agent that orchestrates subagents, the bundled skill helps
 
 ## Extension delegation API
 
-Pi extensions can request one configured foreground agent through the typed v1 event contract:
+Pi extensions can request configured foreground agents through the public event
+contract exported by `pi-subagents/delegation`.
+
+### Delegation v1
+
+The compatibility v1 contract runs one configured foreground agent per request:
 
 ```ts
 import {
@@ -1014,11 +1021,88 @@ pi.events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, request);
 
 The contract uses the established `prompt-template:subagent:*` event transport and the same executor as the `subagent` tool; it does not add another launcher. New integrations must send `version: 1`. Requests are strict and single-agent only. They can set fresh or fork context, model, cwd, timeout, turn and tool-call budgets, skills, output behavior, acceptance, and artifact capture. Unknown or malformed fields return `invalid_request` before execution.
 
-Responses distinguish completion, failure, timeout, cancellation, interruption, turn or tool-budget exhaustion, explicit acceptance failure, invalid requests, and unavailable active context. Optional run, model, output, session, acceptance, usage, progress, and warning fields are omitted when unavailable. Request IDs must be unique while active; duplicate active IDs are ignored so the original request keeps ownership of its terminal response. Emit `SUBAGENT_DELEGATION_CANCEL_EVENT` with the same version and request ID to cancel queued or active work.
+Responses distinguish completion, failure, timeout, cancellation, interruption,
+turn or tool-budget exhaustion, explicit acceptance failure, invalid requests,
+and unavailable active context. Optional metadata is omitted when unavailable.
+Request IDs must be unique while active; duplicate active IDs are ignored so the
+original request keeps ownership of its terminal response. Emit
+`SUBAGENT_DELEGATION_CANCEL_EVENT` with the same version and request ID to cancel
+queued or active work.
+
+### Delegation v2
+
+V2 is the owned-leaf contract for workflow supervisors. Independent requests
+can overlap through the delegated executor without weakening the ordinary
+model-facing tool's one-foreground-call-per-turn guard.
+
+```ts
+import {
+  SUBAGENT_DELEGATION_REQUEST_EVENT,
+  SUBAGENT_DELEGATION_RESPONSE_EVENT,
+  type SubagentDelegationV2Request,
+  type SubagentDelegationV2Response,
+} from "pi-subagents/delegation";
+
+const request: SubagentDelegationV2Request = {
+  version: 2,
+  requestId: crypto.randomUUID(),
+  ownerRunId: workflowRunId,
+  nodeId: "review-accuracy",
+  agent: "reviewer",
+  task: "Review the supplied evidence.",
+  context: "fresh",
+  cwd: ctx.cwd,
+  thinking: "high",
+  result: {
+    kind: "structured",
+    schema: {
+      type: "object",
+      properties: { verdict: { type: "string" } },
+      required: ["verdict"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const unsubscribe = pi.events.on(SUBAGENT_DELEGATION_RESPONSE_EVENT, (payload) => {
+  const response = payload as SubagentDelegationV2Response;
+  if (response.version !== 2 || response.requestId !== request.requestId) return;
+  if (response.ownerRunId !== request.ownerRunId || response.nodeId !== request.nodeId) return;
+  unsubscribe();
+  // Inspect response.status, response.result, response.usage, model, and thinking.
+});
+pi.events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, request);
+```
+
+`ownerRunId` plus `nodeId` is the active logical identity; `requestId` identifies
+one attempt. A second active attempt for the same logical node receives
+`duplicate_node` without disturbing the original. Started, update, response,
+and cancellation payloads carry the full tuple. Cancellation affects only an
+exact tuple, including cancel-before-start races. Each attempt emits at most one
+terminal response.
+
+Result mode is explicit. Text remains literal even when it looks like JSON.
+Structured mode returns the separately captured, schema-validated JSON value.
+Terminal usage reports input, output, cache-read, cache-write, cost, turns, tool
+calls, and duration alongside the effective model and thinking level when
+known. Schemas are capped at 64 KiB; tasks and returned text/structured values
+are capped at 1 MiB, with smaller bounds on identity/configuration strings and
+a maximum v2 `timeoutMs` of 2,147,483,647. V2 alone accepts
+`toolBudget: { hard: 0, block: "*" }` to block the first tool call and run a
+zero-tool leaf; delegation v1 and ordinary model-facing/configured budgets keep
+their existing minimum of one. The foreground bridge retains up to 8,192 exact
+pending-cancellation and settled-attempt identities per extension
+context. If either history fills, it fails closed with `unavailable_context`
+for later v2 starts rather than evicting identity facts; lifecycle reset clears
+the bounded history.
 
 Delegation requires an active extension context. Emit requests from a supported event callback or queued application step, not by recursively invoking the `subagent` tool inside another tool's `tool_call` hook. The caller selects a configured agent, but agent discovery and effective tools remain package-owned. A request cannot grant arbitrary tools, and tool restrictions are not an operating-system sandbox. The detached RPC remains async-only; this API is foreground-only.
 
-Existing prompt-template payloads continue over the same event family, including their parallel-only adapter. `pi-subagents/delegation` is the canonical contract for new extension integrations.
+Existing prompt-template payloads and delegation v1 continue over the same event
+family. V2 remains foreground-only and inherits the configured agent's current
+tools, skills, context, model policy, and workspace authority; it is not a
+sandbox or a durable task broker. `pi-subagents/delegation` is the canonical
+contract for extension integrations.
 
 ## Background-work provider API
 
@@ -1299,7 +1383,7 @@ Requirements:
 
 By default, worktrees are created under the system temp directory. Set `worktreeBaseDir` in config, or `PI_SUBAGENTS_WORKTREE_DIR` when config is unset, to put them under a stable trusted directory. Missing base directories are created automatically.
 
-After a worktree parallel step completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. Worktrees and temp branches are cleaned up in `finally` blocks.
+After a worktree parallel step completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. The runtime also writes a versioned aggregate handoff manifest: foreground runs use the artifact directory's `handoffs/<run-id>.json`, while async runs use `<async-dir>/handoff.json`. The manifest records each child's terminal status, summary, output/session/structured-output references, patch stats and path, and whether its worktree and temporary branch were actually removed. Foreground `details`, async `status.json` and result files, status output, intercom delivery, and completion notifications expose the manifest path. Worktrees and temp branches still receive best-effort fallback cleanup if handoff finalization cannot run.
 
 ## Configuration
 
@@ -1323,13 +1407,21 @@ Controls the parent-facing `subagent` tool description registered at startup. `f
 
 Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false` unless `forceTopLevelAsync` is enabled.
 
+### `fleetView`
+
+```json
+{ "fleetView": false }
+```
+
+Controls the persistent, navigable FleetView below the editor. The default is `true`. Set it to `false` to hide FleetView without disabling status tracking, completion notifications, `/subagents-fleet`, or lifecycle events.
+
 ### `asyncWidget`
 
 ```json
-{ "asyncWidget": false }
+{ "asyncWidget": true }
 ```
 
-Controls the above-editor widget for background runs. The default is `true`. Set it to `false` when another extension renders async lifecycle data in a custom footer, status line, or dashboard; status tracking, completion notifications, `/subagents-fleet`, and lifecycle events continue to work.
+Controls the legacy above-editor widget for background runs. It defaults to `false` while FleetView is enabled and `true` when FleetView is disabled. Set it explicitly to show both surfaces or hide the legacy widget entirely.
 
 ### `waitTool`
 

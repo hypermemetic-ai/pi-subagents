@@ -14,7 +14,7 @@ import {
 	createCompletionBatcher,
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type ParallelHandoffReference, type SubagentState } from "../../shared/types.ts";
 
 export interface SubagentNotifyDetails {
 	agent: string;
@@ -25,6 +25,7 @@ export interface SubagentNotifyDetails {
 	durationMs?: number;
 	sessionLabel?: string;
 	sessionValue?: string;
+	handoffPath?: string;
 }
 
 export interface CompletionNotification {
@@ -47,6 +48,7 @@ export interface CompletionNotification {
 	totalTasks?: number;
 	sessionId?: string | null;
 	triggerTurn?: boolean;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 interface NotifyTimerApi {
@@ -77,6 +79,8 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 		`${taskKind} ${details.status}: **${details.agent}**${details.taskInfo ?? ""}`,
 		"",
 		details.resultPreview.trim() ? details.resultPreview : "(no output)",
+		details.handoffPath ? "" : undefined,
+		details.handoffPath ? `Parallel handoff: ${details.handoffPath}` : undefined,
 		sessionLine ? "" : undefined,
 		sessionLine,
 	]
@@ -97,7 +101,12 @@ export function parseSubagentNotifyContent(content: string): SubagentNotifyDetai
 		}
 	}
 	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
-	const resultPreview = (sessionIndex >= 0 ? body.slice(0, sessionIndex) : body).join("\n").trim() || "(no output)";
+	const handoffIndex = body.findIndex((line) => line.startsWith("Parallel handoff: "));
+	const metadataIndexes = [sessionIndex, handoffIndex].filter((index) => index >= 0);
+	const firstMetadataIndex = metadataIndexes.length ? Math.min(...metadataIndexes) : body.length;
+	const resultEnd = firstMetadataIndex > 0 && body[firstMetadataIndex - 1]?.trim() === "" ? firstMetadataIndex - 1 : firstMetadataIndex;
+	const resultPreview = body.slice(0, resultEnd).join("\n").trim() || "(no output)";
+	const handoffPath = handoffIndex >= 0 ? body[handoffIndex]!.slice("Parallel handoff: ".length).trim() : undefined;
 	let sessionLabel: string | undefined;
 	let sessionValue: string | undefined;
 	if (sessionLine) {
@@ -111,6 +120,7 @@ export function parseSubagentNotifyContent(content: string): SubagentNotifyDetai
 		...(match[1] === "Detached foreground task" ? { source: "foreground" as const } : {}),
 		...(match[4] ? { taskInfo: match[4] } : {}),
 		resultPreview,
+		...(handoffPath ? { handoffPath } : {}),
 		...(sessionLabel && sessionValue ? { sessionLabel, sessionValue } : {}),
 	};
 }
@@ -124,6 +134,7 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 		const sessionLine = formatSessionLine(detail);
 		blocks.push(`${index + 1}. ${detail.agent}${detail.taskInfo ?? ""}`);
 		blocks.push(detail.resultPreview.trim() ? detail.resultPreview : "(no output)");
+		if (detail.handoffPath) blocks.push(`Parallel handoff: ${detail.handoffPath}`);
 		if (sessionLine) blocks.push(sessionLine);
 		blocks.push("");
 	}
@@ -177,6 +188,10 @@ export function buildCompletionDetails(result: CompletionNotification): Subagent
 			? ` (${result.taskIndex + 1}/${result.totalTasks})`
 			: undefined;
 
+	const parallelHandoff = result.parallelHandoff && typeof result.parallelHandoff === "object"
+		? result.parallelHandoff as { path?: unknown }
+		: undefined;
+	const handoffPath = typeof parallelHandoff?.path === "string" ? parallelHandoff.path : undefined;
 	const session =
 		result.shareUrl
 			? { label: "Session", value: result.shareUrl }
@@ -192,6 +207,7 @@ export function buildCompletionDetails(result: CompletionNotification): Subagent
 		...(taskInfo ? { taskInfo } : {}),
 		resultPreview: summary,
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
+		...(handoffPath ? { handoffPath } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
 	};
 }

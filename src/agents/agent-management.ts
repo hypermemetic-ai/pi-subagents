@@ -642,7 +642,10 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 	const d = discoverAgentsAll(ctx.cwd);
 	const scopedAgents = mergeAgentsForScope(scope, d.user, d.project, d.builtin, d.package)
 		.sort((a, b) => a.name.localeCompare(b.name));
-	const agents = scopedAgents.filter((a) => !a.disabled);
+	const trustedDiagnostics = scopedAgents
+		.filter((agent) => agent.trustedPathError)
+		.map((agent) => `${agent.name}: ${agent.trustedPathError}`);
+	const agents = scopedAgents.filter((agent) => !agent.disabled && !agent.trustedPathError);
 	const chains = d.chains.filter((c) => scope === "both" || c.source === "package" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
 	const diagnostics = d.chainDiagnostics.filter((entry) => scope === "both" || entry.source === scope);
 	const proactiveSuggestions = buildProactiveSkillSubagentRecommendationLines({
@@ -656,6 +659,7 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 		...(agents.length
 			? agents.map((a) => `- ${a.name} (${a.source}${a.defaultContext ? `, context: ${a.defaultContext}` : ""}): ${a.description}`)
 			: ["- (none)"]),
+		...(trustedDiagnostics.length ? ["", "Trusted agent diagnostics:", ...trustedDiagnostics.map((entry) => `- ${entry}`)] : []),
 		"",
 		"Chains:",
 		...(chains.length ? chains.map((c) => `- ${c.name} (${c.source}): ${c.description}`) : ["- (none)"]),

@@ -555,8 +555,12 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				? [s.parallel.agent]
 				: [(s as SequentialStep).agent];
 		for (const agentName of stepAgents) {
-			if (!agents.find((x) => x.name === agentName)) {
+			const selected = agents.find((agent) => agent.name === agentName);
+			if (!selected) {
 				return { error: `Unknown agent: ${agentName}` };
+			}
+			if (selected.trustedPathError) {
+				return { error: selected.trustedPathError };
 			}
 		}
 	}

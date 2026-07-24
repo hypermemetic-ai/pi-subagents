@@ -5,6 +5,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
+import type { AgentConfig } from "../agents/agents.ts";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
@@ -215,6 +216,72 @@ export interface ControlEvent {
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "stopped" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
 
+export interface ParallelHandoffPatch {
+	path: string;
+	branch: string;
+	changed: boolean;
+	diffStat: string;
+	filesChanged: number;
+	insertions: number;
+	deletions: number;
+	error?: string;
+}
+
+export interface ParallelHandoffChild {
+	index: number;
+	taskIndex: number;
+	agent: string;
+	status: SubagentResultStatus;
+	summary: string;
+	outputPath?: string;
+	structuredOutput?: unknown;
+	structuredOutputPath?: string;
+	sessionPath?: string;
+	patch: ParallelHandoffPatch;
+}
+
+export interface ParallelHandoffCleanupTask {
+	index: number;
+	path: string;
+	branch: string;
+	worktreeRemoved: boolean;
+	branchRemoved: boolean;
+	errors?: string[];
+}
+
+export interface ParallelHandoffGroup {
+	stepIndex: number;
+	baseCommit: string;
+	repoRoot: string;
+	children: ParallelHandoffChild[];
+	cleanup: {
+		state: "complete" | "partial";
+		tasks: ParallelHandoffCleanupTask[];
+		pruned: boolean;
+		errors?: string[];
+	};
+}
+
+export interface ParallelHandoffManifest {
+	version: 1;
+	runId: string;
+	mode: "parallel" | "chain";
+	source: "foreground" | "async";
+	cwd: string;
+	createdAt: number;
+	updatedAt: number;
+	groups: ParallelHandoffGroup[];
+}
+
+export interface ParallelHandoffReference {
+	version: 1;
+	path: string;
+	groupCount: number;
+	childCount: number;
+	changedPatches: number;
+	cleanupState: "complete" | "partial";
+}
+
 export interface AgentContract {
 	version: 1;
 }
@@ -403,6 +470,7 @@ export interface SubagentResultIntercomPayload {
 	index?: number;
 	artifactPath?: string;
 	sessionPath?: string;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 // ============================================================================
@@ -639,6 +707,8 @@ export interface SingleResult {
 	messages?: Message[];
 	usage: Usage;
 	model?: string;
+	/** Effective thinking level used by this foreground child, when known. */
+	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	controlEvents?: ControlEvent[];
@@ -658,6 +728,7 @@ export interface SingleResult {
 	outputReference?: SavedOutputReference;
 	outputSaveError?: string;
 	structuredOutput?: unknown;
+	structuredOutputFailed?: boolean;
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
@@ -728,6 +799,7 @@ export interface Details {
 	// Aggregated cost across all agents in the run
 	totalCost?: CostSummary;
 	spawnBudget?: SpawnBudgetSnapshot;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 // ============================================================================
@@ -859,6 +931,8 @@ export interface AsyncStartedEvent {
 	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	id?: string;
 	asyncDir?: string;
+	/** Parent-resolved launch directory, used as a trusted artifact root while this session is live. */
+	cwd?: string;
 	pid?: number;
 	sessionId?: string;
 	mode?: SubagentRunMode;
@@ -972,6 +1046,7 @@ export interface AsyncStatus {
 	totalCost?: CostSummary;
 	sessionFile?: string;
 	outputs?: ChainOutputMap;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
@@ -981,7 +1056,11 @@ export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
 export interface AsyncJobState {
 	asyncId: string;
 	asyncDir: string;
+	/** Parent-resolved launch directory retained for trusted live artifact lookup. */
+	cwd?: string;
 	status: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
+	/** Short caller-facing task/goal shown in fleet surfaces when available. */
+	description?: string;
 	pid?: number;
 	sessionId?: string;
 	activityState?: ActivityState;
@@ -1067,9 +1146,55 @@ export interface ForegroundResumeRun {
 	children: ForegroundResumeChild[];
 }
 
+export interface ForegroundChildControl {
+	index: number;
+	agent: string;
+	description?: string;
+	startedAt: number;
+	updatedAt: number;
+	currentActivityState?: ActivityState;
+	lastActivityAt?: number;
+	currentTool?: string;
+	currentToolStartedAt?: number;
+	currentPath?: string;
+	turnCount?: number;
+	tokens?: number;
+	toolCount?: number;
+	interrupt?: () => boolean;
+}
+
+export interface ForegroundRunControl {
+	runId: string;
+	mode: SubagentRunMode;
+	startedAt: number;
+	updatedAt: number;
+	/** Effective working directory used to resolve live transcript artifacts. */
+	cwd?: string;
+	currentAgent?: string;
+	currentIndex?: number;
+	/** Short caller-facing task/goal shown in fleet surfaces when available. */
+	description?: string;
+	currentActivityState?: ActivityState;
+	lastActivityAt?: number;
+	currentTool?: string;
+	currentToolStartedAt?: number;
+	currentPath?: string;
+	turnCount?: number;
+	tokens?: number;
+	toolCount?: number;
+	/** Independently tracked children for foreground parallel work and fleet inspection. */
+	activeChildren?: Map<number, ForegroundChildControl>;
+	nestedRoute?: NestedRouteInfo;
+	nestedChildren?: NestedRunSummary[];
+	interrupt?: () => boolean;
+}
+
 export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
+	/** Runtime-owned artifact resolution inputs used by Fleet transcript targeting. */
+	artifactDirPreference?: ArtifactDirPreference;
+	parentSessionFile?: string | null;
 	subagentInProgress?: boolean;
 	subagentSpawns?: {
 		sessionId: string | null;
@@ -1081,26 +1206,10 @@ export interface SubagentState {
 	asyncJobs: Map<string, AsyncJobState>;
 	/** Current-session active and recent async runs for the native fleet inspector. */
 	fleetJobs?: Map<string, AsyncJobState>;
+	/** Suppress dynamic status widgets while the fleet overlay owns the viewport. */
+	fleetInspectorOpen?: boolean;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
-	foregroundControls: Map<string, {
-		runId: string;
-		mode: SubagentRunMode;
-		startedAt: number;
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		currentPath?: string;
-		turnCount?: number;
-		tokens?: number;
-		toolCount?: number;
-		nestedRoute?: NestedRouteInfo;
-		nestedChildren?: NestedRunSummary[];
-		interrupt?: () => boolean;
-	}>;
+	foregroundControls: Map<string, ForegroundRunControl>;
 	lastForegroundControlId: string | null;
 	pendingForegroundControlNotices?: Map<string, ReturnType<typeof setTimeout>>;
 	cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -1165,7 +1274,10 @@ export interface RunSyncOptions {
 	timeoutMs?: number;
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
+	/** Enforce maxTurns + graceTurns as a hard model-turn boundary. */
+	enforceHardTurnLimit?: boolean;
 	toolBudget?: ResolvedToolBudget;
+	allowZeroToolBudget?: boolean;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
@@ -1250,7 +1362,9 @@ export interface ScheduledRunsConfig {
 
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
-	/** Show the above-editor async runs widget. Defaults to true. */
+	/** Show the Claude Code-style navigable fleet below the editor. Defaults to true. */
+	fleetView?: boolean;
+	/** Show the legacy above-editor async runs widget. Defaults to true only when fleetView is disabled. */
 	asyncWidget?: boolean;
 	/** Tool description variant registered for the parent-facing subagent tool. Defaults to full. */
 	toolDescriptionMode?: ToolDescriptionMode;

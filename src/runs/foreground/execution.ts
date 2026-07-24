@@ -52,7 +52,8 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
-import { readStructuredOutput } from "../shared/structured-output.ts";
+import { resolveEffectiveThinking } from "../../shared/model-info.ts";
+import { MISSING_STRUCTURED_OUTPUT_CALL_ERROR, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
 import { captureSingleOutputSnapshot, extractChildWrittenOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
@@ -204,6 +205,7 @@ async function runSingleAttempt(
 ): Promise<SingleResult> {
 	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
 	const modelArg = applyThinkingSuffix(model, effectiveThinking, options.thinkingOverride !== undefined);
+	const resolvedThinking = resolveEffectiveThinking(modelArg, effectiveThinking);
 	const watchdogConfig = resolveWatchdogConfig(options.cwd ?? runtimeCwd);
 	const childWatchdog = watchdogConfig.ok
 		? resolveChildWatchdogConfig({
@@ -244,6 +246,7 @@ async function runSingleAttempt(
 		parentSessionId: options.parentSessionId,
 		structuredOutput: options.structuredOutput,
 		toolBudget: options.toolBudget,
+		allowZeroToolBudget: options.allowZeroToolBudget,
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
 	});
@@ -256,6 +259,7 @@ async function runSingleAttempt(
 		messages: [],
 		usage: emptyUsage(),
 		model: modelArg,
+		...(resolvedThinking ? { thinking: resolvedThinking } : {}),
 		artifactPaths: shared.artifactPaths,
 		transcriptPath: shared.transcriptWriter ? shared.artifactPaths?.transcriptPath : undefined,
 		skills: shared.resolvedSkillNames,
@@ -316,6 +320,7 @@ async function runSingleAttempt(
 	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
+	let structuredOutputToolInvoked = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
@@ -601,7 +606,7 @@ async function runSingleAttempt(
 				result.wrapUpRequested = true;
 				appendRecentOutput(progress, [turnBudgetSoftNote(budget, turnCount)]);
 			}
-			const decision = turnBudgetDecision(budget, turnCount, terminalAssistantStop, toolWorkActiveOrStarting);
+			const decision = turnBudgetDecision(budget, turnCount, terminalAssistantStop, toolWorkActiveOrStarting, options.enforceHardTurnLimit);
 			if (decision === "defer") {
 				result.turnBudget = turnBudgetDeferredState(
 					budget,
@@ -655,7 +660,7 @@ async function runSingleAttempt(
 		const fireUpdate = () => {
 			if (!options.onUpdate || processClosed) return;
 			progress.durationMs = Date.now() - startTime;
-			const output = (result.timedOut || result.turnBudgetExceeded) && result.finalOutput ? result.finalOutput : getFinalOutput(result.messages);
+			const output = (result.timedOut || result.turnBudgetExceeded) && result.finalOutput ? result.finalOutput : getFinalOutput(result.messages ?? []);
 			emitUpdateSnapshot(output || "(running...)");
 		};
 
@@ -705,6 +710,7 @@ async function runSingleAttempt(
 				const toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)
 					? evt.args as Record<string, unknown>
 					: {};
+				if (options.structuredOutput && evt.toolName === "structured_output") structuredOutputToolInvoked = true;
 				if (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {
 					intercomStarted = true;
 				}
@@ -738,15 +744,20 @@ async function runSingleAttempt(
 			}
 
 			if (evt.type === "message_end" && evt.message) {
-				result.messages.push(evt.message);
+				result.messages!.push(evt.message);
 				if (evt.message.role === "assistant") {
 					result.usage.turns++;
 					progress.turnCount = result.usage.turns;
 					const stopReason = (evt.message as { stopReason?: string }).stopReason;
-					const hasToolCall = Array.isArray(evt.message.content)
-						&& evt.message.content.some((part) => (part as { type?: string }).type === "toolCall");
+					const toolCalls = Array.isArray(evt.message.content)
+						? evt.message.content.filter((part) => (part as { type?: string }).type === "toolCall")
+						: [];
+					const hasToolCall = toolCalls.length > 0;
 					const terminalAssistantStop = stopReason === "stop" && !hasToolCall;
-					updateTurnBudget(result.usage.turns, terminalAssistantStop, hasToolCall || Boolean(progress.currentTool));
+					const terminalStructuredOutputCall = Boolean(options.structuredOutput)
+						&& toolCalls.length === 1
+						&& (toolCalls[0] as { name?: string }).name === "structured_output";
+					updateTurnBudget(result.usage.turns, terminalAssistantStop || terminalStructuredOutputCall, hasToolCall || Boolean(progress.currentTool));
 					const u = evt.message.usage;
 					if (u) {
 						result.usage.input += u.input || 0;
@@ -772,7 +783,7 @@ async function runSingleAttempt(
 			}
 
 			if (evt.type === "tool_result_end" && evt.message) {
-				result.messages.push(evt.message);
+				result.messages!.push(evt.message);
 				const resultText = extractTextFromContent(evt.message.content);
 				if (options.toolBudget && pendingToolResult && resultText.includes("Tool budget hard limit reached")) {
 					result.toolBudgetBlocked = true;
@@ -1030,7 +1041,7 @@ async function runSingleAttempt(
 		result.exitCode = 1;
 	}
 	if (result.exitCode === 0 && !result.error) {
-		const errInfo = detectSubagentError(result.messages);
+		const errInfo = detectSubagentError(result.messages ?? []);
 		if (errInfo.hasError) {
 			result.exitCode = errInfo.exitCode ?? 1;
 			result.error = errInfo.details
@@ -1039,7 +1050,7 @@ async function runSingleAttempt(
 		}
 	}
 	if (result.exitCode === 0 && !result.error) {
-		const finalText = getFinalOutput(result.messages);
+		const finalText = getFinalOutput(result.messages ?? []);
 		const missingStructuredOutput = options.structuredOutput
 			? !existsSync(options.structuredOutput.outputPath)
 			: false;
@@ -1049,18 +1060,25 @@ async function runSingleAttempt(
 		}
 	}
 	if (options.structuredOutput && result.exitCode === 0 && !result.error) {
-		const structured = await readStructuredOutput({
-			schema: options.structuredOutput.schema,
-			schemaPath: options.structuredOutput.schemaPath,
-			outputPath: options.structuredOutput.outputPath,
-		});
 		result.structuredOutputSchemaPath = options.structuredOutput.schemaPath;
 		result.structuredOutputPath = options.structuredOutput.outputPath;
-		if (structured.error) {
+		if (!structuredOutputToolInvoked) {
 			result.exitCode = 1;
-			result.error = structured.error;
+			result.error = MISSING_STRUCTURED_OUTPUT_CALL_ERROR;
+			result.structuredOutputFailed = true;
 		} else {
-			result.structuredOutput = structured.value;
+			const structured = await readStructuredOutput({
+				schema: options.structuredOutput.schema,
+				schemaPath: options.structuredOutput.schemaPath,
+				outputPath: options.structuredOutput.outputPath,
+			});
+			if (structured.error) {
+				result.exitCode = 1;
+				result.error = structured.error;
+				result.structuredOutputFailed = true;
+			} else {
+				result.structuredOutput = structured.value;
+			}
 		}
 	}
 
@@ -1079,7 +1097,7 @@ async function runSingleAttempt(
 		durationMs: progress.durationMs,
 	};
 
-	const acceptanceOutput = getFinalOutput(result.messages);
+	const acceptanceOutput = getFinalOutput(result.messages ?? []);
 	let fullOutput = stripAcceptanceReport(acceptanceOutput);
 	if (result.timedOut) {
 		const timeoutMessage = formatTimeoutMessage(options.timeoutMs ?? 0);
@@ -1100,7 +1118,7 @@ async function runSingleAttempt(
 		? evaluateCompletionMutationGuard({
 			agent: agent.name,
 			task: shared.originalTask ?? task,
-			messages: result.messages,
+			messages: result.messages ?? [],
 			tools: agent.tools,
 			mcpDirectTools: agent.mcpDirectTools,
 		})

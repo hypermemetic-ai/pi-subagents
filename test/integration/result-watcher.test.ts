@@ -453,6 +453,7 @@ describe("result watcher", () => {
 					sessionId: "session-1",
 					sessionFile: "/tmp/session.jsonl",
 					asyncDir: "/tmp/async-1",
+					parallelHandoff: { version: 1, path: "/tmp/async-1/handoff.json", groupCount: 1, childCount: 2, changedPatches: 1, cleanupState: "complete" },
 					intercomTarget: "subagent-chat-main",
 				}), "utf-8");
 				watcher.primeExistingResults();
@@ -463,14 +464,17 @@ describe("result watcher", () => {
 
 			const intercomEvents = emitted.filter((entry) => entry.event === "subagent:result-intercom");
 			assert.equal(intercomEvents.length, 1);
-			const eventData = intercomEvents[0]?.data as { message?: string; mode?: string; status?: string };
+			const eventData = intercomEvents[0]?.data as { message?: string; mode?: string; status?: string; parallelHandoff?: { path?: string } };
 			assert.equal(eventData.mode, "parallel");
 			assert.equal(eventData.status, "failed");
+			assert.equal(eventData.parallelHandoff?.path, "/tmp/async-1/handoff.json");
 			const message = String(eventData.message ?? "");
 			assert.match(message, /Revive child: subagent\(\{ action: "resume", id: "async-1", index: 0, message: "\.\.\." \}\)/);
 			assert.ok(message.includes(`Session: ${firstSession}`));
+			assert.match(message, /Parallel handoff: \/tmp\/async-1\/handoff\.json/);
 			assert.equal(message.includes(missingSession), false);
-			assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"), true);
+			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { parallelHandoff?: { path?: string } } | undefined;
+			assert.equal(completion?.parallelHandoff?.path, "/tmp/async-1/handoff.json");
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}
