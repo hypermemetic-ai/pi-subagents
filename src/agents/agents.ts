@@ -147,6 +147,8 @@ export interface AgentConfig {
 	extraFields?: Record<string, string>;
 	override?: BuiltinAgentOverrideInfo;
 	modelSource?: AgentModelSourceInfo;
+	/** Set only by opt-in trusted-path discovery when this selected definition cannot occupy its reserved name. */
+	trustedPathError?: string;
 }
 
 interface SubagentSettings {

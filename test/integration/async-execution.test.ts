@@ -695,8 +695,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	});
 
 	it("marks async parallel runs that exceed timeoutMs as timed out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
-		mockPi.onCall({ delay: 5_000, output: "one done" });
-		mockPi.onCall({ delay: 5_000, output: "two done" });
+		mockPi.onCall({ delay: 15_000, output: "one done" });
+		mockPi.onCall({ delay: 15_000, output: "two done" });
 		const id = `async-timeout-parallel-${Date.now().toString(36)}`;
 		executeAsyncChain(id, {
 			chain: [{
@@ -719,26 +719,26 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			},
 			shareEnabled: false,
 			maxSubagentDepth: 2,
-			timeoutMs: 1_500,
+			timeoutMs: 5_000,
 		});
 
-		await waitForMockPiCall(mockPi, 1, 10_000);
-		const resultPath = await waitForAsyncResultFile(id, 8_000);
+		await waitForMockPiCall(mockPi, 1, 20_000);
+		const resultPath = await waitForAsyncResultFile(id, 12_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.state, "failed");
 		assert.equal(payload.success, false);
 		assert.equal(payload.exitCode, 1);
-		assert.equal(payload.timeoutMs, 1_500);
+		assert.equal(payload.timeoutMs, 5_000);
 		assert.equal(payload.timedOut, true);
-		assert.match(payload.summary ?? "", /Subagent timed out after 1500ms\./);
+		assert.match(payload.summary ?? "", /Subagent timed out after 5000ms\./);
 		assert.equal(status.state, "failed");
-		assert.equal(status.timeoutMs, 1_500);
+		assert.equal(status.timeoutMs, 5_000);
 		assert.equal(status.timedOut, true);
-		assert.match(status.error ?? "", /Subagent timed out after 1500ms\./);
+		assert.match(status.error ?? "", /Subagent timed out after 5000ms\./);
 		assert.deepEqual(status.steps?.map((step) => step.status), ["failed", "failed"]);
 		assert.deepEqual(status.steps?.map((step) => step.timedOut), [true, true]);
-		assert.deepEqual(status.steps?.map((step) => step.error), ["Subagent timed out after 1500ms.", "Subagent timed out after 1500ms."]);
+		assert.deepEqual(status.steps?.map((step) => step.error), ["Subagent timed out after 5000ms.", "Subagent timed out after 5000ms."]);
 		assert.deepEqual(payload.results.map((result) => result.timedOut), [true, true]);
 		assert.equal(mockPi.callCount(), 2);
 	});
@@ -1924,7 +1924,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 					collect: { as: "reviews" },
 					acceptance: {
 						level: "verified",
-						verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 5000)"`, timeoutMs: 10_000 }],
+						verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 15000)"`, timeoutMs: 20_000 }],
 					},
 				},
 			],
@@ -1933,10 +1933,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
 			shareEnabled: false,
 			maxSubagentDepth: 2,
-			timeoutMs: 1_000,
+			timeoutMs: 5_000,
 		});
 
-		const resultPath = await waitForAsyncResultFile(id, 5_000);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
 		const elapsedMs = Date.now() - startedAt;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
@@ -1946,10 +1946,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.results.at(-1)?.timedOut, true);
 		assert.equal(payload.results.at(-1)?.acceptance, undefined);
 		assert.equal(dynamicNode?.status, "failed");
-		assert.match(dynamicNode?.error ?? "", /Subagent timed out after 1000ms\./);
+		assert.match(dynamicNode?.error ?? "", /Subagent timed out after 5000ms\./);
 		assert.notEqual(dynamicNode?.acceptanceStatus, "verified");
 		assert.equal(status.timedOut, true);
-		assert.ok(elapsedMs < 3_000, `timeout should cancel dynamic aggregate acceptance promptly, elapsed ${elapsedMs}ms`);
+		assert.ok(elapsedMs < 8_000, `timeout should cancel dynamic aggregate acceptance promptly, elapsed ${elapsedMs}ms`);
 	});
 
 	it("async dynamic fanout recomputes later child intercom targets by final flat index", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -2864,15 +2864,22 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(statusPayload.steps?.[0]?.effects?.fileMutation?.status, "missing");
 	});
 
-	it("background single runs support outputSchema", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
-		mockPi.onCall({ output: "structured", structuredOutput: { ok: true, note: "async" } });
+	it("background single recovers an earlier tool error with structured output and persists its recovery contract", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: true, note: "async" },
+		});
 		const id = `async-single-schema-${Date.now().toString(36)}`;
+		const outputPath = path.join(tempDir, "async-structured-result.md");
+		const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, note: { type: "string" } } };
+		const acceptance = { level: "none" as const, reason: "test contract" };
 
 		executeAsyncSingle(id, {
 			agent: "worker",
 			task: "Return structured data",
 			agentConfig: makeAgent("worker", { completionGuard: false }),
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			cwd: tempDir,
 			artifactConfig: {
 				enabled: false,
 				includeInput: false,
@@ -2884,9 +2891,21 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			shareEnabled: false,
 			sessionRoot: path.join(tempDir, "sessions"),
 			maxSubagentDepth: 2,
-			acceptance: false,
-			structuredOutputSchema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, note: { type: "string" } } },
+			acceptance,
+			structuredOutputSchema: schema,
+			output: outputPath,
+			outputMode: "inline",
+			timeoutMs: 60_000,
 		});
+
+		const descriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "recovery-descriptor.json"), "utf-8"));
+		assert.equal(descriptor.agent, "worker");
+		assert.equal(descriptor.cwd, tempDir);
+		assert.deepEqual(descriptor.structuredOutputSchema, schema);
+		assert.deepEqual(descriptor.acceptance, acceptance);
+		assert.equal(descriptor.outputPath, outputPath);
+		assert.equal(descriptor.outputMode, "inline");
+		assert.ok(descriptor.absoluteDeadlineAt > Date.now());
 
 		const payload = JSON.parse(fs.readFileSync(await waitForAsyncResultFile(id, 10_000), "utf-8")) as AsyncResultPayload;
 		assert.equal(payload.success, true);

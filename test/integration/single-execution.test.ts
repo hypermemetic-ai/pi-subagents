@@ -325,6 +325,36 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		});
 	}
 
+	it("refuses an invalid trusted seat without blocking an unrelated agent", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const reviewer = {
+			...makeAgent("reviewer"),
+			trustedPathError: "Trusted agent 'reviewer' resolved to a project definition.",
+		};
+		const executor = makeExecutor([reviewer, makeAgent("helper")]);
+
+		const blocked = await executor.execute(
+			"blocked-reviewer",
+			{ agent: "reviewer", task: "Review" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(blocked.isError, true);
+		assert.match(blocked.content[0]?.text ?? "", /Trusted agent 'reviewer'/);
+		assert.equal(mockPi.callCount(), 0);
+
+		mockPi.onCall({ output: "helper done" });
+		const allowed = await executor.execute(
+			"allowed-helper",
+			{ agent: "helper", task: "Help" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(allowed.isError, undefined);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
 	it("spawns agent and captures output", async () => {
 		mockPi.onCall({ output: "Hello from mock agent" });
 		const agents = makeAgentConfigs(["echo"]);
@@ -1224,6 +1254,51 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.isError, undefined);
 		assert.equal(child?.turnBudgetExceeded, undefined);
 		assert.deepEqual(child?.structuredOutput, { ok: true });
+	});
+
+	it("foreground single recovers an earlier tool error only with valid terminal structured output", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: true },
+		});
+		const recovered = await executor.execute(
+			"single-schema-recovered",
+			{ agent: "echo", task: "Return structured data", outputSchema: schema, acceptance: false },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(recovered.isError, undefined);
+		assert.deepEqual(recovered.details?.results?.[0]?.structuredOutput, { ok: true });
+
+		mockPi.reset();
+		mockPi.onCall({ jsonl: [events.toolResult("bash", "permission denied", true)] });
+		const missing = await executor.execute(
+			"single-schema-missing",
+			{ agent: "echo", task: "Return structured data", outputSchema: schema, acceptance: false },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(missing.isError, true);
+
+		mockPi.reset();
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: "yes" },
+		});
+		const invalid = await executor.execute(
+			"single-schema-invalid",
+			{ agent: "echo", task: "Return structured data", outputSchema: schema, acceptance: false },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(invalid.isError, true);
+		assert.match(invalid.content[0]?.text ?? "", /Structured output validation failed/);
 	});
 
 	it("returns captured output when the foreground executor fails an implementation run", async () => {

@@ -84,6 +84,28 @@ describe("async runner execution", () => {
 		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 4, block: ["read"] });
 	});
 
+	it("refuses invalid trusted seats at the shared async runner-step boundary", () => {
+		const blocked = {
+			...agent("reviewer"),
+			trustedPathError: "Trusted agent 'reviewer' resolved to a project definition.",
+		};
+		for (const [index, chain] of [
+			[{ agent: "reviewer", task: "Review" }],
+			[{ parallel: [{ agent: "worker", task: "Work" }, { agent: "reviewer", task: "Review" }] }],
+			[{ expand: { from: { output: "items", path: "/items" } }, parallel: { agent: "reviewer", task: "Review" }, collect: { as: "reviews" } }],
+		].entries()) {
+			const result = buildAsyncRunnerSteps(`blocked-${index}`, {
+				chain,
+				agents: [agent("worker"), blocked],
+				ctx,
+				asyncDir: path.join(process.cwd(), `.tmp-async-blocked-${index}`),
+				maxSubagentDepth: 2,
+				validateOutputBindings: false,
+			});
+			assert.deepEqual(result, { error: blocked.trustedPathError });
+		}
+	});
+
 	it("uses config default when no step, run, or agent budget exists", () => {
 		const result = buildAsyncRunnerSteps("run-3", {
 			chain: [{ agent: "worker", task: "config default" }],

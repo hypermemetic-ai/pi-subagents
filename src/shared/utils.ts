@@ -416,7 +416,7 @@ export function compactForegroundDetails(details: Details): Details {
  * Detect errors in subagent execution from messages (only errors with no subsequent success)
  */
 export function detectSubagentError(messages: Message[]): ErrorInfo {
-	let lastAssistantTextIndex = -1;
+	let lastRecoveryIndex = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
@@ -424,13 +424,21 @@ export function detectSubagentError(messages: Message[]): ErrorInfo {
 				(c) => c.type === "text" && "text" in c && typeof c.text === "string" && c.text.trim().length > 0,
 			);
 			if (hasText) {
-				lastAssistantTextIndex = i;
+				lastRecoveryIndex = i;
+				break;
+			}
+		}
+		if (msg.role === "toolResult") {
+			const toolName = "toolName" in msg && typeof msg.toolName === "string" ? msg.toolName : undefined;
+			const isError = "isError" in msg && msg.isError === true;
+			if (toolName === "structured_output" && !isError) {
+				lastRecoveryIndex = i;
 				break;
 			}
 		}
 	}
 
-	const scanStart = lastAssistantTextIndex >= 0 ? lastAssistantTextIndex + 1 : 0;
+	const scanStart = lastRecoveryIndex >= 0 ? lastRecoveryIndex + 1 : 0;
 
 	for (let i = messages.length - 1; i >= scanStart; i--) {
 		const msg = messages[i];
