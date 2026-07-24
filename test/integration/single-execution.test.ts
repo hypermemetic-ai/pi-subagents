@@ -790,6 +790,51 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(result.details?.results?.[0]?.structuredOutput, { ok: true, note: "captured" });
 	});
 
+	it("foreground single recovers an earlier tool error only with valid terminal structured output", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: true },
+		});
+		const recovered = await executor.execute(
+			"single-schema-recovered",
+			{ agent: "echo", task: "Return structured data", outputSchema: schema, acceptance: { level: "none", reason: "test contract" } },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(recovered.isError, undefined);
+		assert.deepEqual(recovered.details?.results?.[0]?.structuredOutput, { ok: true });
+
+		mockPi.reset();
+		mockPi.onCall({ jsonl: [events.toolResult("bash", "permission denied", true)] });
+		const missing = await executor.execute(
+			"single-schema-missing",
+			{ agent: "echo", task: "Return structured data", outputSchema: schema, acceptance: { level: "none", reason: "test contract" } },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(missing.isError, true);
+
+		mockPi.reset();
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: "yes" },
+		});
+		const invalid = await executor.execute(
+			"single-schema-invalid",
+			{ agent: "echo", task: "Return structured data", outputSchema: schema, acceptance: { level: "none", reason: "test contract" } },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(invalid.isError, true);
+		assert.match(invalid.content[0]?.text ?? "", /Structured output validation failed/);
+	});
+
 	it("returns captured output when the foreground executor fails an implementation run", async () => {
 		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
 		const executor = makeExecutor([makeAgent("oracle")]);

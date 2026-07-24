@@ -665,10 +665,14 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 	});
 
 	it("revives from the persisted contract when the agent definition was removed", async () => {
-		mockPi.onCall({ output: "descriptor-backed answer" });
+		mockPi.onCall({ output: "descriptor-backed answer", structuredOutput: { ok: true } });
 		const runId = `resume-descriptor-${Date.now()}`;
 		const asyncDir = path.join(ASYNC_DIR, runId);
 		const sessionFile = path.join(tempDir, "descriptor-child.jsonl");
+		const outputPath = path.join(tempDir, "descriptor-output.md");
+		const sessionDir = path.join(tempDir, "descriptor-sessions");
+		const structuredOutputSchema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+		const acceptance = { level: "none", reason: "persisted test contract" };
 		let revivedId: string | undefined;
 		try {
 			fs.mkdirSync(asyncDir, { recursive: true });
@@ -688,7 +692,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				systemPromptMode: "replace",
 				inheritProjectContext: false,
 				inheritSkills: false,
+				outputPath,
 				outputMode: "inline",
+				structuredOutputSchema,
+				acceptance,
+				sessionDir,
 				maxSubagentDepth: 1,
 				share: false,
 			}, null, 2), "utf-8");
@@ -708,10 +716,19 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			const args = await readMockCallArgs(0);
 			assert.equal(args[args.indexOf("--session") + 1], sessionFile);
 			assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4:high");
-			assert.equal(args[args.indexOf("--tools") + 1], "read");
+			assert.equal(args[args.indexOf("--tools") + 1], "read,structured_output");
 			assert.equal(args.includes("--system-prompt"), true);
 			assert.equal(args.includes("--append-system-prompt"), false);
 			await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`));
+			const revivedDescriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, revivedId, "recovery-descriptor.json"), "utf-8"));
+			assert.equal(revivedDescriptor.agent, "removed-worker");
+			assert.equal(revivedDescriptor.cwd, tempDir);
+			assert.equal(revivedDescriptor.sessionFile, sessionFile);
+			assert.equal(revivedDescriptor.outputPath, outputPath);
+			assert.equal(revivedDescriptor.outputMode, "inline");
+			assert.equal(revivedDescriptor.sessionDir, sessionDir);
+			assert.deepEqual(revivedDescriptor.structuredOutputSchema, structuredOutputSchema);
+			assert.deepEqual(revivedDescriptor.acceptance, acceptance);
 		} finally {
 			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}

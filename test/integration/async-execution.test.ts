@@ -2815,15 +2815,22 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(statusPayload.steps?.[0]?.effects?.fileMutation?.status, "missing");
 	});
 
-	it("background single runs support outputSchema", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
-		mockPi.onCall({ output: "structured", structuredOutput: { ok: true, note: "async" } });
+	it("background single recovers an earlier tool error with structured output and persists its recovery contract", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: true, note: "async" },
+		});
 		const id = `async-single-schema-${Date.now().toString(36)}`;
+		const outputPath = path.join(tempDir, "async-structured-result.md");
+		const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, note: { type: "string" } } };
+		const acceptance = { level: "none" as const, reason: "test contract" };
 
 		executeAsyncSingle(id, {
 			agent: "worker",
 			task: "Return structured data",
 			agentConfig: makeAgent("worker", { completionGuard: false }),
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			cwd: tempDir,
 			artifactConfig: {
 				enabled: false,
 				includeInput: false,
@@ -2835,9 +2842,21 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			shareEnabled: false,
 			sessionRoot: path.join(tempDir, "sessions"),
 			maxSubagentDepth: 2,
-			acceptance: false,
-			structuredOutputSchema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, note: { type: "string" } } },
+			acceptance,
+			structuredOutputSchema: schema,
+			output: outputPath,
+			outputMode: "inline",
+			timeoutMs: 60_000,
 		});
+
+		const descriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "recovery-descriptor.json"), "utf-8"));
+		assert.equal(descriptor.agent, "worker");
+		assert.equal(descriptor.cwd, tempDir);
+		assert.deepEqual(descriptor.structuredOutputSchema, schema);
+		assert.deepEqual(descriptor.acceptance, acceptance);
+		assert.equal(descriptor.outputPath, outputPath);
+		assert.equal(descriptor.outputMode, "inline");
+		assert.ok(descriptor.absoluteDeadlineAt > Date.now());
 
 		const payload = JSON.parse(fs.readFileSync(await waitForAsyncResultFile(id, 10_000), "utf-8")) as AsyncResultPayload;
 		assert.equal(payload.success, true);
