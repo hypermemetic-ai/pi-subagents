@@ -482,9 +482,9 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 export function applySteeringRecoveryAgentConfig(agentConfig: AgentConfig, descriptor: SteeringRecoveryDescriptor): AgentConfig {
 	return {
 		...agentConfig,
-		model: descriptor.model,
-		fallbackModels: descriptor.fallbackModels ? [...descriptor.fallbackModels] : undefined,
-		thinking: descriptor.thinking,
+		model: agentConfig.trustedExecutionProfile ? agentConfig.model : descriptor.model,
+		fallbackModels: agentConfig.trustedExecutionProfile ? [] : descriptor.fallbackModels ? [...descriptor.fallbackModels] : undefined,
+		thinking: agentConfig.trustedExecutionProfile ? agentConfig.thinking : descriptor.thinking,
 		tools: descriptor.tools ? [...descriptor.tools] : undefined,
 		extensions: descriptor.extensions ? [...descriptor.extensions] : undefined,
 		subagentOnlyExtensions: descriptor.subagentOnlyExtensions ? [...descriptor.subagentOnlyExtensions] : undefined,

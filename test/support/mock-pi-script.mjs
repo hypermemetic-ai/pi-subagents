@@ -185,6 +185,14 @@ function writeStructuredOutputCapture(response) {
 	fs.writeFileSync(outputPath, JSON.stringify(response.structuredOutputCapture), "utf-8");
 }
 
+function writeExecutionProfileReceipt(response) {
+	if (!Object.prototype.hasOwnProperty.call(response, "executionProfileReceipt")) return;
+	const receiptPath = process.env.PI_SUBAGENT_EXECUTION_PROFILE_RECEIPT;
+	if (!receiptPath) return;
+	fs.mkdirSync(path.dirname(receiptPath), { recursive: true });
+	fs.writeFileSync(receiptPath, JSON.stringify(response.executionProfileReceipt), "utf-8");
+}
+
 function writeToolDiagnostic(response) {
 	if (!Array.isArray(response.missingTools) || response.missingTools.length === 0) return;
 	const diagnosticPath = process.env.PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH;
@@ -327,6 +335,7 @@ async function main() {
 	}
 	writeSessionFile(args);
 	writeToolDiagnostic(response);
+	writeExecutionProfileReceipt(response);
 	fs.writeFileSync(
 		path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
 		JSON.stringify({ args, systemPrompts: readSystemPromptRecords(args) }),

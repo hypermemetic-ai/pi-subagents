@@ -28,6 +28,8 @@ interface MockPiResponse {
 	writeFiles?: Array<{ path: string; content: string }>;
 	/** Writes the structured-output capture file without emitting a structured_output tool event. */
 	structuredOutputCapture?: unknown;
+	/** Writes the trusted execution-profile receipt expected from the child Pi runtime. */
+	executionProfileReceipt?: unknown;
 }
 
 export interface MockPi {

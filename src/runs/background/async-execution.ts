@@ -652,6 +652,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
+			...(a.trustedExecutionProfile ? { executionProfile: { ...a.trustedExecutionProfile } } : {}),
 			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
 				applyThinkingSuffix(candidate, effectiveThinking, thinkingOverride !== undefined),
 			),
@@ -1219,6 +1220,7 @@ export function executeAsyncSingle(
 						cwd: runnerCwd,
 						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),
+						...(agentConfig.trustedExecutionProfile ? { executionProfile: { ...agentConfig.trustedExecutionProfile } } : {}),
 						modelCandidates: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
 							applyThinkingSuffix(candidate, effectiveThinking, params.thinkingOverride !== undefined),
 						),

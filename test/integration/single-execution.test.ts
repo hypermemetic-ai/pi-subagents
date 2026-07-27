@@ -51,6 +51,8 @@ import {
 	SUBAGENT_PARENT_CONTROL_INBOX_ENV,
 	SUBAGENT_PARENT_EVENT_SINK_ENV,
 	SUBAGENT_PARENT_RUN_ID_ENV,
+	EXECUTION_PROFILE_RECEIPT_ENV,
+	TRUSTED_EXECUTION_ROLE_ENV,
 } from "../../src/runs/shared/pi-args.ts";
 
 interface ModelAttempt {
@@ -88,6 +90,14 @@ interface RunSyncResult {
 	error?: string;
 	protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number };
 	model?: string;
+	executionProfile?: {
+		provider: string;
+		model: string;
+		effort: string;
+		serviceClass: string;
+		acknowledgedServiceClass?: string;
+		accountedServiceClass?: string;
+	};
 	skills?: string[];
 	skillsWarning?: string;
 	attemptedModels?: string[];
@@ -1514,6 +1524,77 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		// overwritten by the first message_end event only if result.model is unset.
 		// Since agent has model config, it stays as the configured value.
 		assert.equal(result.model, "anthropic/claude-sonnet-4");
+	});
+
+	it("clears an inherited profile receipt path from ordinary nested children", async () => {
+		const previousReceipt = process.env[EXECUTION_PROFILE_RECEIPT_ENV];
+		const previousRole = process.env[TRUSTED_EXECUTION_ROLE_ENV];
+		process.env[EXECUTION_PROFILE_RECEIPT_ENV] = "/tmp/ancestor-receipt.json";
+		process.env[TRUSTED_EXECUTION_ROLE_ENV] = "observer";
+		try {
+			mockPi.onCall({ echoEnv: [EXECUTION_PROFILE_RECEIPT_ENV, TRUSTED_EXECUTION_ROLE_ENV] });
+			const result = await runSync(tempDir, makeAgentConfigs(["helper"]), "helper", "Task", {});
+			assert.equal(result.exitCode, 0);
+			assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), {
+				[EXECUTION_PROFILE_RECEIPT_ENV]: null,
+				[TRUSTED_EXECUTION_ROLE_ENV]: null,
+			});
+		} finally {
+			if (previousReceipt === undefined) delete process.env[EXECUTION_PROFILE_RECEIPT_ENV];
+			else process.env[EXECUTION_PROFILE_RECEIPT_ENV] = previousReceipt;
+			if (previousRole === undefined) delete process.env[TRUSTED_EXECUTION_ROLE_ENV];
+			else process.env[TRUSTED_EXECUTION_ROLE_ENV] = previousRole;
+		}
+	});
+
+	it("requires and exposes a matching trusted execution-profile receipt", async () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		const receipt = { ...profile, acknowledgedServiceClass: "default", accountedServiceClass: "default" };
+		mockPi.onCall({ echoEnv: [TRUSTED_EXECUTION_ROLE_ENV], executionProfileReceipt: receipt });
+		const agents = [makeAgent("observer", {
+			model: "kimi-coding/k3",
+			thinking: "max",
+			fallbackModels: [],
+			trustedExecutionProfile: profile,
+		})];
+
+		const result = await runSync(tempDir, agents, "observer", "Task", {});
+
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(result.executionProfile, receipt);
+		assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), { [TRUSTED_EXECUTION_ROLE_ENV]: "observer" });
+	});
+
+	it("fails a trusted run when the child omits its execution-profile receipt", async () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("observer", {
+			model: "kimi-coding/k3",
+			thinking: "max",
+			fallbackModels: [],
+			trustedExecutionProfile: profile,
+		})];
+
+		const result = await runSync(tempDir, agents, "observer", "Task", {});
+
+		assert.equal(result.exitCode, 1);
+		assert.match(result.error ?? "", /execution-profile-receipt\.json|ENOENT/);
+	});
+
+	it("rejects a trusted model override before spawning", async () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		const agents = [makeAgent("observer", {
+			model: "kimi-coding/k3",
+			thinking: "max",
+			fallbackModels: [],
+			trustedExecutionProfile: profile,
+		})];
+
+		await assert.rejects(
+			() => runSync(tempDir, agents, "observer", "Task", { modelOverride: "openai-codex/gpt-5.6-sol" }),
+			/Trusted execution profile conflict/,
+		);
+		assert.equal(mockPi.callCount(), 0);
 	});
 
 	it("model override from options takes precedence", async () => {

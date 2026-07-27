@@ -165,6 +165,44 @@ describe("steering lifecycle ledger", () => {
 		}
 	});
 
+	it("uses the current trusted execution profile instead of persisted recovery compute", () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		const current = {
+			name: "observer",
+			description: "observer",
+			model: "kimi-coding/k3",
+			thinking: "max",
+			fallbackModels: [],
+			trustedExecutionProfile: profile,
+			systemPrompt: "observe",
+			systemPromptMode: "replace",
+			inheritProjectContext: false,
+			inheritSkills: false,
+			source: "user",
+			filePath: "/trusted/observer.md",
+		} as AgentConfig;
+		const recovered = applySteeringRecoveryAgentConfig(current, {
+			version: 1,
+			sourceRunId: "source",
+			agent: "observer",
+			cwd: "/original",
+			model: "openai-codex/gpt-5.6-sol",
+			fallbackModels: ["fallback/model"],
+			thinking: "xhigh",
+			systemPromptMode: "replace",
+			inheritProjectContext: false,
+			inheritSkills: false,
+			outputMode: "inline",
+			maxSubagentDepth: undefined,
+			share: false,
+		});
+
+		assert.equal(recovered.model, "kimi-coding/k3");
+		assert.equal(recovered.thinking, "max");
+		assert.deepEqual(recovered.fallbackModels, []);
+		assert.deepEqual(recovered.trustedExecutionProfile, profile);
+	});
+
 	it("rejects recovery when any configured hard budget is exhausted", () => {
 		assert.throws(() => remainingSteeringRecoveryLimits({ absoluteDeadlineAt: 5 }, {}, 5), /deadline budget/);
 		assert.throws(() => remainingSteeringRecoveryLimits({ initialTurnBudget: { maxTurns: 2, graceTurns: 1 } }, { turnCount: 3 }), /turn budget/);

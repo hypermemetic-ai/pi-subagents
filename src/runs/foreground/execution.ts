@@ -52,6 +52,7 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { readExecutionProfileReceipt } from "../shared/execution-profile.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { MISSING_STRUCTURED_OUTPUT_CALL_ERROR, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
@@ -215,7 +216,14 @@ async function runSingleAttempt(
 			childIndex: options.index ?? 0,
 		})
 		: undefined;
-	const { args, env: sharedEnv, tempDir, toolDiagnosticPath } = buildPiArgs({
+	const {
+		args,
+		env: sharedEnv,
+		tempDir,
+		toolDiagnosticPath,
+		executionProfileReceiptPath,
+		executionProfile,
+	} = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
 		sessionEnabled: shared.sessionEnabled,
@@ -249,6 +257,7 @@ async function runSingleAttempt(
 		allowZeroToolBudget: options.allowZeroToolBudget,
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
+		trustedExecutionProfile: agent.trustedExecutionProfile,
 	});
 
 	const result: SingleResult = withRunContext({
@@ -260,6 +269,7 @@ async function runSingleAttempt(
 		usage: emptyUsage(),
 		model: modelArg,
 		...(resolvedThinking ? { thinking: resolvedThinking } : {}),
+		...(executionProfile ? { executionProfile: { ...executionProfile } } : {}),
 		artifactPaths: shared.artifactPaths,
 		transcriptPath: shared.transcriptWriter ? shared.artifactPaths?.transcriptPath : undefined,
 		skills: shared.resolvedSkillNames,
@@ -895,11 +905,18 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			const toolDiagnosticError = readChildToolDiagnosticError(toolDiagnosticPath);
+			let executionProfileReceiptError: string | undefined;
+			try {
+				const receipt = readExecutionProfileReceipt(executionProfileReceiptPath, executionProfile);
+				if (receipt) result.executionProfile = receipt;
+			} catch (error) {
+				executionProfileReceiptError = error instanceof Error ? error.message : String(error);
+			}
 			cleanupTempDir(tempDir);
 			stdoutReader.end();
 			stderrReader.end();
 			const stderr = stderrTail.text();
-			let closeError = result.error ?? toolDiagnosticError ?? assistantError;
+			let closeError = result.error ?? toolDiagnosticError ?? executionProfileReceiptError ?? assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && (cleanTerminalAssistantStopReceived || agentSettledReceived) && !closeError;
 			if (code !== 0 && stderr.trim() && !closeError && !forcedDrainAfterFinalSuccess) {
 				closeError = stderr.trim();
@@ -1311,6 +1328,7 @@ export async function runSync(
 			exitCode: target.exitCode,
 			usage: target.usage,
 			model: target.model,
+			executionProfile: target.executionProfile,
 			attemptedModels: target.attemptedModels,
 			modelAttempts: target.modelAttempts,
 			durationMs: target.progressSummary?.durationMs,

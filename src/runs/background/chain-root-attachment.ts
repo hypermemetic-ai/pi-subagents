@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AcceptanceLedger, AsyncStatus, CostSummary, ModelAttempt } from "../../shared/types.ts";
+import type { AcceptanceLedger, AsyncStatus, CostSummary, ExecutionProfileTelemetry, ModelAttempt } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 
 export interface ImportedAsyncRoot {
@@ -19,6 +19,7 @@ export interface ImportedAsyncRootResult {
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
+	executionProfile?: ExecutionProfileTelemetry;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	totalCost?: CostSummary;
@@ -47,6 +48,7 @@ interface AsyncResultFile {
 		sessionFile?: string;
 		intercomTarget?: string;
 		model?: string;
+		executionProfile?: ExecutionProfileTelemetry;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
 		totalCost?: CostSummary;
@@ -108,6 +110,7 @@ function outputFromTerminalStatus(root: ImportedAsyncRoot, status: AsyncStatus, 
 		...(stopped ? { stopped: true } : {}),
 		...(step?.sessionFile ?? status.sessionFile ? { sessionFile: step?.sessionFile ?? status.sessionFile } : {}),
 		...(step?.model ? { model: step.model } : {}),
+		...(step?.executionProfile ? { executionProfile: step.executionProfile } : {}),
 		...(step?.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 		...(step?.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
 		...(step?.totalCost ? { totalCost: step.totalCost } : {}),
@@ -129,6 +132,7 @@ function outputFromTimeout(root: ImportedAsyncRoot, status: AsyncStatus | null, 
 		timedOut: true,
 		...(step?.sessionFile ?? status?.sessionFile ? { sessionFile: step?.sessionFile ?? status?.sessionFile } : {}),
 		...(step?.model ? { model: step.model } : {}),
+		...(step?.executionProfile ? { executionProfile: step.executionProfile } : {}),
 		...(step?.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 		...(step?.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
 		...(step?.totalCost ? { totalCost: step.totalCost } : {}),
@@ -156,6 +160,7 @@ function buildImportedResult(root: ImportedAsyncRoot, status: AsyncStatus | null
 		...(child?.sessionFile ?? step?.sessionFile ?? status?.sessionFile ? { sessionFile: child?.sessionFile ?? step?.sessionFile ?? status?.sessionFile } : {}),
 		...(child?.intercomTarget ? { intercomTarget: child.intercomTarget } : {}),
 		...(child?.model ?? step?.model ? { model: child?.model ?? step?.model } : {}),
+		...(child?.executionProfile ?? step?.executionProfile ? { executionProfile: child?.executionProfile ?? step?.executionProfile } : {}),
 		...(child?.attemptedModels ?? step?.attemptedModels ? { attemptedModels: child?.attemptedModels ?? step?.attemptedModels } : {}),
 		...(child?.modelAttempts ?? step?.modelAttempts ? { modelAttempts: child?.modelAttempts ?? step?.modelAttempts } : {}),
 		...(child?.totalCost ?? step?.totalCost ? { totalCost: child?.totalCost ?? step?.totalCost } : {}),

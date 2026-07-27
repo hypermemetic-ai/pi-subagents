@@ -23,6 +23,8 @@ import {
 	SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV,
 	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 	SUBAGENT_RUN_ID_ENV,
+	EXECUTION_PROFILE_RECEIPT_ENV,
+	TRUSTED_EXECUTION_ROLE_ENV,
 	applyThinkingSuffix,
 	buildPiArgs,
 } from "../../src/runs/shared/pi-args.ts";
@@ -42,6 +44,8 @@ const originalEnv = {
 	PI_SUBAGENT_PARENT_CAPABILITY_TOKEN: process.env.PI_SUBAGENT_PARENT_CAPABILITY_TOKEN,
 	PI_SUBAGENT_PARENT_SESSION: process.env.PI_SUBAGENT_PARENT_SESSION,
 	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
+	[EXECUTION_PROFILE_RECEIPT_ENV]: process.env[EXECUTION_PROFILE_RECEIPT_ENV],
+	[TRUSTED_EXECUTION_ROLE_ENV]: process.env[TRUSTED_EXECUTION_ROLE_ENV],
 	[TOOL_BUDGET_ZERO_AUTH_ENV]: process.env[TOOL_BUDGET_ZERO_AUTH_ENV],
 	[PI_CODING_AGENT_PACKAGE_ROOT_ENV]: process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV],
 };
@@ -253,6 +257,65 @@ describe("buildPiArgs session wiring", () => {
 });
 
 describe("buildPiArgs model wiring", () => {
+	it("clears an inherited execution-profile receipt from an unprofiled child", () => {
+		process.env[EXECUTION_PROFILE_RECEIPT_ENV] = "/tmp/ancestor-receipt.json";
+		process.env[TRUSTED_EXECUTION_ROLE_ENV] = "observer";
+		const result = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "ordinary/model",
+			inheritProjectContext: false,
+			inheritSkills: false,
+			childAgentName: "helper",
+		});
+
+		assert.equal(Object.hasOwn(result.env, EXECUTION_PROFILE_RECEIPT_ENV), true);
+		assert.equal(result.env[EXECUTION_PROFILE_RECEIPT_ENV], undefined);
+		assert.equal(result.env[TRUSTED_EXECUTION_ROLE_ENV], undefined);
+		assert.equal(result.executionProfileReceiptPath, undefined);
+	});
+
+	it("locks a trusted execution profile and provisions its child receipt", () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		const result = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "kimi-coding/k3",
+			thinking: "max",
+			inheritProjectContext: false,
+			inheritSkills: false,
+			childAgentName: "observer",
+			trustedExecutionProfile: profile,
+		});
+		if (result.tempDir) tempRoots.push(result.tempDir);
+
+		assert.deepEqual(result.executionProfile, profile);
+		assert.equal(result.executionProfileReceiptPath, result.env[EXECUTION_PROFILE_RECEIPT_ENV]);
+		assert.equal(result.env[TRUSTED_EXECUTION_ROLE_ENV], "observer");
+		assert.equal(path.dirname(result.executionProfileReceiptPath ?? ""), result.tempDir);
+		assert.ok(result.args.includes("kimi-coding/k3:max"));
+	});
+
+	it("rejects invocation-time model and effort conflicts with a trusted profile", () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		const build = (model: string, thinking: string) => buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model,
+			thinking,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			childAgentName: "observer",
+			trustedExecutionProfile: profile,
+		});
+
+		assert.throws(() => build("openai-codex/gpt-5.6-sol", "xhigh"), /Trusted execution profile conflict.*observer/);
+		assert.throws(() => build("kimi-coding/k3", "high"), /Trusted execution profile conflict.*observer/);
+	});
+
 	it("uses --model for provider-qualified model ids", () => {
 		const { args } = buildPiArgs({
 			baseArgs: ["-p"],
