@@ -38,6 +38,7 @@ export const SUBAGENT_STEER_INBOX_ENV = "PI_SUBAGENT_STEER_INBOX";
 export const SUBAGENT_STEER_CAPABILITY_ENV = "PI_SUBAGENT_STEER_CAPABILITY";
 export const SUBAGENT_STEER_ACK_DIR_ENV = "PI_SUBAGENT_STEER_ACK_DIR";
 export const EXECUTION_PROFILE_RECEIPT_ENV = "PI_SUBAGENT_EXECUTION_PROFILE_RECEIPT";
+export const TRUSTED_EXECUTION_ROLE_ENV = "PI_SUBAGENT_TRUSTED_EXECUTION_ROLE";
 
 interface BuildPiArgsInput {
 	parentSessionId?: string;
@@ -205,7 +206,10 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 		args.push(`Task: ${input.task}`);
 	}
 
-	const env: Record<string, string | undefined> = { [EXECUTION_PROFILE_RECEIPT_ENV]: undefined };
+	const env: Record<string, string | undefined> = {
+		[EXECUTION_PROFILE_RECEIPT_ENV]: undefined,
+		[TRUSTED_EXECUTION_ROLE_ENV]: undefined,
+	};
 	const piPackageRoot = process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] ?? resolvePiPackageRoot();
 	if (piPackageRoot) env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] = piPackageRoot;
 	let toolDiagnosticPath: string | undefined;
@@ -304,9 +308,11 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 
 	let executionProfileReceiptPath: string | undefined;
 	if (input.trustedExecutionProfile) {
+		if (!input.childAgentName) throw new Error("Trusted execution profile requires a child role assertion.");
 		if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
 		executionProfileReceiptPath = path.join(tempDir, "execution-profile-receipt.json");
 		env[EXECUTION_PROFILE_RECEIPT_ENV] = executionProfileReceiptPath;
+		env[TRUSTED_EXECUTION_ROLE_ENV] = input.childAgentName;
 	}
 
 	return {

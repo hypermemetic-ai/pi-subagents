@@ -52,6 +52,7 @@ import {
 	SUBAGENT_PARENT_EVENT_SINK_ENV,
 	SUBAGENT_PARENT_RUN_ID_ENV,
 	EXECUTION_PROFILE_RECEIPT_ENV,
+	TRUSTED_EXECUTION_ROLE_ENV,
 } from "../../src/runs/shared/pi-args.ts";
 
 interface ModelAttempt {
@@ -1526,23 +1527,30 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 	});
 
 	it("clears an inherited profile receipt path from ordinary nested children", async () => {
-		const previous = process.env[EXECUTION_PROFILE_RECEIPT_ENV];
+		const previousReceipt = process.env[EXECUTION_PROFILE_RECEIPT_ENV];
+		const previousRole = process.env[TRUSTED_EXECUTION_ROLE_ENV];
 		process.env[EXECUTION_PROFILE_RECEIPT_ENV] = "/tmp/ancestor-receipt.json";
+		process.env[TRUSTED_EXECUTION_ROLE_ENV] = "observer";
 		try {
-			mockPi.onCall({ echoEnv: [EXECUTION_PROFILE_RECEIPT_ENV] });
+			mockPi.onCall({ echoEnv: [EXECUTION_PROFILE_RECEIPT_ENV, TRUSTED_EXECUTION_ROLE_ENV] });
 			const result = await runSync(tempDir, makeAgentConfigs(["helper"]), "helper", "Task", {});
 			assert.equal(result.exitCode, 0);
-			assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), { [EXECUTION_PROFILE_RECEIPT_ENV]: null });
+			assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), {
+				[EXECUTION_PROFILE_RECEIPT_ENV]: null,
+				[TRUSTED_EXECUTION_ROLE_ENV]: null,
+			});
 		} finally {
-			if (previous === undefined) delete process.env[EXECUTION_PROFILE_RECEIPT_ENV];
-			else process.env[EXECUTION_PROFILE_RECEIPT_ENV] = previous;
+			if (previousReceipt === undefined) delete process.env[EXECUTION_PROFILE_RECEIPT_ENV];
+			else process.env[EXECUTION_PROFILE_RECEIPT_ENV] = previousReceipt;
+			if (previousRole === undefined) delete process.env[TRUSTED_EXECUTION_ROLE_ENV];
+			else process.env[TRUSTED_EXECUTION_ROLE_ENV] = previousRole;
 		}
 	});
 
 	it("requires and exposes a matching trusted execution-profile receipt", async () => {
 		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
 		const receipt = { ...profile, acknowledgedServiceClass: "default", accountedServiceClass: "default" };
-		mockPi.onCall({ output: "Done", executionProfileReceipt: receipt });
+		mockPi.onCall({ echoEnv: [TRUSTED_EXECUTION_ROLE_ENV], executionProfileReceipt: receipt });
 		const agents = [makeAgent("observer", {
 			model: "kimi-coding/k3",
 			thinking: "max",
@@ -1554,6 +1562,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 		assert.equal(result.exitCode, 0);
 		assert.deepEqual(result.executionProfile, receipt);
+		assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), { [TRUSTED_EXECUTION_ROLE_ENV]: "observer" });
 	});
 
 	it("fails a trusted run when the child omits its execution-profile receipt", async () => {

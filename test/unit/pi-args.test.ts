@@ -24,6 +24,7 @@ import {
 	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 	SUBAGENT_RUN_ID_ENV,
 	EXECUTION_PROFILE_RECEIPT_ENV,
+	TRUSTED_EXECUTION_ROLE_ENV,
 	applyThinkingSuffix,
 	buildPiArgs,
 } from "../../src/runs/shared/pi-args.ts";
@@ -44,6 +45,7 @@ const originalEnv = {
 	PI_SUBAGENT_PARENT_SESSION: process.env.PI_SUBAGENT_PARENT_SESSION,
 	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
 	[EXECUTION_PROFILE_RECEIPT_ENV]: process.env[EXECUTION_PROFILE_RECEIPT_ENV],
+	[TRUSTED_EXECUTION_ROLE_ENV]: process.env[TRUSTED_EXECUTION_ROLE_ENV],
 	[TOOL_BUDGET_ZERO_AUTH_ENV]: process.env[TOOL_BUDGET_ZERO_AUTH_ENV],
 	[PI_CODING_AGENT_PACKAGE_ROOT_ENV]: process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV],
 };
@@ -257,6 +259,7 @@ describe("buildPiArgs session wiring", () => {
 describe("buildPiArgs model wiring", () => {
 	it("clears an inherited execution-profile receipt from an unprofiled child", () => {
 		process.env[EXECUTION_PROFILE_RECEIPT_ENV] = "/tmp/ancestor-receipt.json";
+		process.env[TRUSTED_EXECUTION_ROLE_ENV] = "observer";
 		const result = buildPiArgs({
 			baseArgs: ["-p"],
 			task: "hello",
@@ -269,6 +272,7 @@ describe("buildPiArgs model wiring", () => {
 
 		assert.equal(Object.hasOwn(result.env, EXECUTION_PROFILE_RECEIPT_ENV), true);
 		assert.equal(result.env[EXECUTION_PROFILE_RECEIPT_ENV], undefined);
+		assert.equal(result.env[TRUSTED_EXECUTION_ROLE_ENV], undefined);
 		assert.equal(result.executionProfileReceiptPath, undefined);
 	});
 
@@ -289,6 +293,7 @@ describe("buildPiArgs model wiring", () => {
 
 		assert.deepEqual(result.executionProfile, profile);
 		assert.equal(result.executionProfileReceiptPath, result.env[EXECUTION_PROFILE_RECEIPT_ENV]);
+		assert.equal(result.env[TRUSTED_EXECUTION_ROLE_ENV], "observer");
 		assert.equal(path.dirname(result.executionProfileReceiptPath ?? ""), result.tempDir);
 		assert.ok(result.args.includes("kimi-coding/k3:max"));
 	});
