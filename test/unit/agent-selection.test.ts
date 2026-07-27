@@ -89,6 +89,77 @@ describe("mergeAgentsForScope", () => {
 		assert.equal(result[0]?.source, "project");
 	});
 
+	it("injects an immutable trusted execution profile after exact path validation", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "trusted-agent-profile-"));
+		try {
+			const trustedPath = path.join(dir, "observer.md");
+			writeFileSync(trustedPath, "trusted");
+			const trusted = {
+				...makeAgent("observer", "user", "trusted prompt", trustedPath),
+				model: "manifest/model",
+				thinking: "low",
+				fallbackModels: ["fallback/model"],
+			} as AgentConfig;
+			const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" };
+			const result = mergeAgentsForScope(
+				"both",
+				[trusted],
+				[],
+				[],
+				[],
+				JSON.stringify({ observer: trustedPath }),
+				JSON.stringify({ observer: profile }),
+			);
+			assert.equal(result[0]?.model, "kimi-coding/k3");
+			assert.equal(result[0]?.thinking, "max");
+			assert.deepEqual(result[0]?.fallbackModels, []);
+			assert.deepEqual(result[0]?.trustedExecutionProfile, profile);
+			assert.equal(Object.isFrozen(result[0]?.trustedExecutionProfile), true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("requires trusted profile keys to match trusted seats exactly", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "trusted-agent-profile-"));
+		try {
+			const trustedPath = path.join(dir, "observer.md");
+			writeFileSync(trustedPath, "trusted");
+			const trusted = makeAgent("observer", "user", "trusted prompt", trustedPath);
+			const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" };
+			assert.throws(
+				() => mergeAgentsForScope("both", [trusted], [], [], [], undefined, JSON.stringify({ observer: profile })),
+				/requires PI_SUBAGENT_TRUSTED_AGENT_PATHS/,
+			);
+			assert.throws(
+				() => mergeAgentsForScope("both", [trusted], [], [], [], JSON.stringify({ observer: trustedPath }), JSON.stringify({ reviewer: profile })),
+				/agent keys must exactly match/,
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects malformed trusted execution profiles before selection", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "trusted-agent-profile-"));
+		try {
+			const trustedPath = path.join(dir, "observer.md");
+			writeFileSync(trustedPath, "trusted");
+			const trusted = makeAgent("observer", "user", "trusted prompt", trustedPath);
+			const paths = JSON.stringify({ observer: trustedPath });
+			assert.throws(
+				() => mergeAgentsForScope("both", [trusted], [], [], [], paths, JSON.stringify({ observer: { provider: "kimi-coding", model: "k3", effort: "turbo", serviceClass: "provider-default" } })),
+				/observer\.effort.*unsupported/,
+			);
+			assert.throws(
+				() => mergeAgentsForScope("both", [trusted], [], [], [], paths, JSON.stringify({ observer: { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default", fallback: "other" } })),
+				/must contain exactly/,
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("accepts a trusted agent only from its exact regular file", () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "trusted-agent-selection-"));
 		try {

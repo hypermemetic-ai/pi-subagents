@@ -18,6 +18,7 @@ export interface RunnerSubagentStep {
 	cwd?: string;
 	model?: string;
 	thinking?: string;
+	executionProfile?: import("../../shared/types.ts").ExecutionProfileSelection;
 	modelCandidates?: string[];
 	tools?: string[];
 	extensions?: string[];

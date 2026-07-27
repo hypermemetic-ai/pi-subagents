@@ -367,21 +367,33 @@ describe("subagent async widget rendering", () => {
 				asyncDir: "/tmp/1",
 				status: "running",
 				mode: "parallel",
-				agents: ["reviewer", "scout"],
+				agents: ["reviewer", "scout", "observer"],
 				activeParallelGroup: true,
-				runningSteps: 2,
+				runningSteps: 3,
 				completedSteps: 0,
-				stepsTotal: 2,
+				stepsTotal: 3,
 				steps: [
 					{ agent: "reviewer", status: "running", model: "openai-codex/gpt-5.5:high" },
 					{ agent: "scout", status: "running", model: "anthropic/claude-haiku-4-5", thinking: "low" },
+					{
+						agent: "observer",
+						status: "running",
+						executionProfile: {
+							provider: "kimi-coding",
+							model: "k3",
+							effort: "max",
+							serviceClass: "provider-default",
+							acknowledgedServiceClass: "default",
+						},
+					},
 				],
 			},
 		], theme, 180);
 
 		const text = lines.join("\n");
-		assert.match(text, /Agent 1\/2: reviewer · running \(gpt-5\.5 · thinking high\)/);
-		assert.match(text, /Agent 2\/2: scout · running \(claude-haiku-4-5 · thinking low\)/);
+		assert.match(text, /Agent 1\/3: reviewer · running \(gpt-5\.5 · thinking high\)/);
+		assert.match(text, /Agent 2\/3: scout · running \(claude-haiku-4-5 · thinking low\)/);
+		assert.match(text, /Agent 3\/3: observer · running \(kimi-coding\/k3 • max • service provider-default → default\)/);
 		assert.doesNotMatch(text, /openai-codex\/gpt-5\.5/);
 		assert.doesNotMatch(text, /gpt-5\.5:high/);
 	});

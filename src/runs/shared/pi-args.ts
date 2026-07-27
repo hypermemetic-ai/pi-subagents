@@ -6,7 +6,7 @@ import { encodeNestedPathEnv, parseNestedPathEnv, type NestedPathEntry } from ".
 import { resolveMcpDirectToolNames } from "./mcp-direct-tool-allowlist.ts";
 import { resolvePiPackageRoot } from "./pi-spawn.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "./structured-output.ts";
-import { TEMP_ROOT_DIR, type JsonSchemaObject, type ResolvedToolBudget } from "../../shared/types.ts";
+import { TEMP_ROOT_DIR, type ExecutionProfileSelection, type JsonSchemaObject, type ResolvedToolBudget } from "../../shared/types.ts";
 import { THINKING_LEVELS } from "../../shared/model-info.ts";
 import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
 import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, REQUIRED_CHILD_TOOLS_ENV } from "./tool-availability.ts";
@@ -37,6 +37,7 @@ export const SUBAGENT_PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
 export const SUBAGENT_STEER_INBOX_ENV = "PI_SUBAGENT_STEER_INBOX";
 export const SUBAGENT_STEER_CAPABILITY_ENV = "PI_SUBAGENT_STEER_CAPABILITY";
 export const SUBAGENT_STEER_ACK_DIR_ENV = "PI_SUBAGENT_STEER_ACK_DIR";
+export const EXECUTION_PROFILE_RECEIPT_ENV = "PI_SUBAGENT_EXECUTION_PROFILE_RECEIPT";
 
 interface BuildPiArgsInput {
 	parentSessionId?: string;
@@ -83,6 +84,7 @@ interface BuildPiArgsInput {
 	allowZeroToolBudget?: boolean;
 	childWatchdog?: ChildWatchdogConfig;
 	waitToolEnabled?: boolean;
+	trustedExecutionProfile?: Readonly<ExecutionProfileSelection>;
 }
 
 interface BuildPiArgsResult {
@@ -90,6 +92,8 @@ interface BuildPiArgsResult {
 	env: Record<string, string | undefined>;
 	tempDir?: string;
 	toolDiagnosticPath?: string;
+	executionProfileReceiptPath?: string;
+	executionProfile?: Readonly<ExecutionProfileSelection>;
 }
 
 function sanitizeSupervisorChannelSegment(value: string): string {
@@ -111,6 +115,15 @@ export function applyThinkingSuffix(model: string | undefined, thinking: string 
 
 export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	const args = [...input.baseArgs];
+	if (input.trustedExecutionProfile) {
+		const profile = input.trustedExecutionProfile;
+		const expectedBase = `${profile.provider}/${profile.model}`;
+		const expectedModel = profile.effort === "provider-default" ? expectedBase : `${expectedBase}:${profile.effort}`;
+		const selectedModel = applyThinkingSuffix(input.model, input.thinking);
+		if (selectedModel !== expectedModel) {
+			throw new Error(`Trusted execution profile conflict for '${input.childAgentName ?? "unknown"}': expected '${expectedModel}', received '${selectedModel ?? "none"}'.`);
+		}
+	}
 
 	if (input.sessionFile) {
 		fs.mkdirSync(path.dirname(input.sessionFile), { recursive: true });
@@ -192,7 +205,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 		args.push(`Task: ${input.task}`);
 	}
 
-	const env: Record<string, string | undefined> = {};
+	const env: Record<string, string | undefined> = { [EXECUTION_PROFILE_RECEIPT_ENV]: undefined };
 	const piPackageRoot = process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] ?? resolvePiPackageRoot();
 	if (piPackageRoot) env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] = piPackageRoot;
 	let toolDiagnosticPath: string | undefined;
@@ -289,7 +302,21 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 
 	env[SUBAGENT_PARENT_SESSION_ENV] = input.parentSessionId ?? process.env[SUBAGENT_PARENT_SESSION_ENV] ?? "";
 
-	return { args, env, tempDir, toolDiagnosticPath };
+	let executionProfileReceiptPath: string | undefined;
+	if (input.trustedExecutionProfile) {
+		if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
+		executionProfileReceiptPath = path.join(tempDir, "execution-profile-receipt.json");
+		env[EXECUTION_PROFILE_RECEIPT_ENV] = executionProfileReceiptPath;
+	}
+
+	return {
+		args,
+		env,
+		tempDir,
+		toolDiagnosticPath,
+		executionProfileReceiptPath,
+		executionProfile: input.trustedExecutionProfile,
+	};
 }
 
 export const parseParentPathEnv = parseNestedPathEnv;
