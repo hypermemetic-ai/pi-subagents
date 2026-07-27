@@ -152,7 +152,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	}
 
-	function makeExecutor(options: { bridgeMode?: "always" | "off"; agents?: ReturnType<typeof makeAgent>[]; acknowledgeResults?: boolean; kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean } = {}) {
+	function makeExecutor(options: { bridgeMode?: "always" | "off"; agents?: ReturnType<typeof makeAgent>[]; agentsByScope?: Partial<Record<"user" | "project" | "both", ReturnType<typeof makeAgent>[]>>; acknowledgeResults?: boolean; kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean } = {}) {
 		const events = createRecordingEventBus({ acknowledgeResults: options.acknowledgeResults ?? true });
 		const state = {
 			baseCwd: tempDir,
@@ -186,7 +186,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			tempArtifactsDir: tempDir,
 			getSubagentSessionRoot: () => tempDir,
 			expandTilde: (value: string) => value,
-			discoverAgents: () => ({ agents: options.agents ?? [makeAgent("worker")] }),
+			discoverAgents: (_cwd: string, scope: "user" | "project" | "both") => ({ agents: options.agentsByScope?.[scope] ?? options.agents ?? [makeAgent("worker")] }),
 			kill: options.kill,
 		});
 		return { executor, events, state };
@@ -469,6 +469,26 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				summary: "root output",
 				results: [{ agent: "worker", output: "root output", success: true, sessionFile: sourceSession }],
 			}, null, 2), "utf-8");
+			const blockedReviewer = {
+				...makeAgent("reviewer"),
+				trustedPathError: "Trusted agent 'reviewer' resolved to a project definition.",
+			};
+			const { executor: blockedExecutor, events: blockedEvents } = makeExecutor({ agents: [makeAgent("worker"), blockedReviewer] });
+			const blocked = await blockedExecutor.execute(
+				"resume-chain-root-blocked",
+				{
+					action: "resume",
+					id: sourceRunId,
+					chain: [{ agent: "reviewer", task: "Review this root result: {previous}" }],
+				},
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(blocked.isError, true);
+			assert.match(blocked.content[0]?.text ?? "", /Trusted agent 'reviewer'/);
+			assert.equal(blockedEvents.emitted.some((entry) => entry.channel === SUBAGENT_ASYNC_STARTED_EVENT), false);
+
 			const { executor, events } = makeExecutor({ agents: [makeAgent("worker"), makeAgent("reviewer")] });
 
 			const result = await executor.execute(
@@ -505,6 +525,45 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		} finally {
 			fs.rmSync(sourceAsyncDir, { recursive: true, force: true });
 			fs.rmSync(sourceResultPath, { force: true });
+		}
+	});
+
+	it("append-step refuses an invalid trusted seat before queuing it", async () => {
+		const runId = `append-trusted-seat-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				sessionId: "session-123",
+				mode: "chain",
+				state: "running",
+				startedAt: 100,
+				lastUpdate: 100,
+				cwd: tempDir,
+				chainStepCount: 1,
+				steps: [{ agent: "worker", status: "running" }],
+			}, null, 2), "utf-8");
+			const blockedReviewer = {
+				...makeAgent("reviewer"),
+				trustedPathError: "Trusted agent 'reviewer' resolved to a project definition.",
+			};
+			const { executor } = makeExecutor({ agents: [makeAgent("worker"), blockedReviewer] });
+
+			const result = await executor.execute(
+				"append-trusted-seat",
+				{ action: "append-step", id: runId, chain: [{ agent: "reviewer", task: "Review" }] },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /Trusted agent 'reviewer'/);
+			assert.equal(fs.existsSync(path.join(asyncDir, "append-requests")), false);
+			assert.equal(mockPi.callCount(), 0);
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}
 	});
 
@@ -665,10 +724,14 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 	});
 
 	it("revives from the persisted contract when the agent definition was removed", async () => {
-		mockPi.onCall({ output: "descriptor-backed answer" });
+		mockPi.onCall({ output: "descriptor-backed answer", structuredOutput: { ok: true } });
 		const runId = `resume-descriptor-${Date.now()}`;
 		const asyncDir = path.join(ASYNC_DIR, runId);
 		const sessionFile = path.join(tempDir, "descriptor-child.jsonl");
+		const outputPath = path.join(tempDir, "descriptor-output.md");
+		const sessionDir = path.join(tempDir, "descriptor-sessions");
+		const structuredOutputSchema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+		const acceptance = { level: "none", reason: "persisted test contract" };
 		let revivedId: string | undefined;
 		try {
 			fs.mkdirSync(asyncDir, { recursive: true });
@@ -688,7 +751,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				systemPromptMode: "replace",
 				inheritProjectContext: false,
 				inheritSkills: false,
+				outputPath,
 				outputMode: "inline",
+				structuredOutputSchema,
+				acceptance,
+				sessionDir,
 				maxSubagentDepth: 1,
 				share: false,
 			}, null, 2), "utf-8");
@@ -708,11 +775,151 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			const args = await readMockCallArgs(0);
 			assert.equal(args[args.indexOf("--session") + 1], sessionFile);
 			assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4:high");
-			assert.equal(args[args.indexOf("--tools") + 1], "read");
+			assert.equal(args[args.indexOf("--tools") + 1], "read,structured_output");
 			assert.equal(args.includes("--system-prompt"), true);
 			assert.equal(args.includes("--append-system-prompt"), false);
 			await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`));
+			const revivedDescriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, revivedId, "recovery-descriptor.json"), "utf-8"));
+			assert.equal(revivedDescriptor.agent, "removed-worker");
+			assert.equal(revivedDescriptor.cwd, tempDir);
+			assert.equal(revivedDescriptor.sessionFile, sessionFile);
+			assert.equal(revivedDescriptor.outputPath, outputPath);
+			assert.equal(revivedDescriptor.outputMode, "inline");
+			assert.equal(revivedDescriptor.sessionDir, sessionDir);
+			assert.deepEqual(revivedDescriptor.structuredOutputSchema, structuredOutputSchema);
+			assert.deepEqual(revivedDescriptor.acceptance, acceptance);
 		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves a trusted resume from the complete current seat outside the requested scope", async () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		mockPi.onCall({ output: "trusted resumed answer", executionProfileReceipt: profile });
+		const runId = `resume-trusted-current-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const sessionFile = path.join(tempDir, "trusted-current-child.jsonl");
+		const trustedPath = path.join(tempDir, "trusted-observer.md");
+		const previousPolicy = process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS;
+		let revivedId: string | undefined;
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			fs.writeFileSync(trustedPath, "trusted", "utf-8");
+			process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = JSON.stringify({ observer: trustedPath });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId, sessionId: "session-123", mode: "single", state: "paused", startedAt: 100, lastUpdate: 200, cwd: tempDir,
+				steps: [{ agent: "observer", status: "paused", sessionFile }],
+			}, null, 2), "utf-8");
+			fs.writeFileSync(path.join(asyncDir, "recovery-descriptor.json"), JSON.stringify({
+				version: 1,
+				sourceRunId: runId,
+				agent: "observer",
+				agentFilePath: trustedPath,
+				cwd: tempDir,
+				model: "stale/model",
+				tools: ["stale-tool"],
+				extensions: ["/stale-extension.ts"],
+				subagentOnlyExtensions: [],
+				systemPrompt: "Stale persisted prompt",
+				systemPromptMode: "replace",
+				inheritProjectContext: true,
+				inheritSkills: true,
+				outputMode: "inline",
+				maxSubagentDepth: 1,
+				share: false,
+			}, null, 2), "utf-8");
+			const current = makeAgent("observer", {
+				filePath: trustedPath,
+				model: "kimi-coding/k3",
+				thinking: "max",
+				fallbackModels: [],
+				tools: ["read"],
+				extensions: [],
+				subagentOnlyExtensions: ["/current-receipt.ts"],
+				systemPrompt: "Current trusted prompt",
+				inheritProjectContext: false,
+				inheritSkills: false,
+				trustedExecutionProfile: profile,
+			});
+			const { executor } = makeExecutor({ bridgeMode: "off", agentsByScope: { project: [], both: [current] } });
+
+			const result = await executor.execute(
+				"resume-trusted-current",
+				{ action: "resume", id: runId, message: "Continue safely.", agentScope: "project" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined);
+			revivedId = result.details.asyncId;
+			assert.ok(revivedId);
+			const args = await readMockCallArgs(0);
+			assert.equal(args[args.indexOf("--model") + 1], "kimi-coding/k3:max");
+			assert.equal(args[args.indexOf("--tools") + 1], "read");
+			assert.ok(args.includes("/current-receipt.ts"));
+			assert.ok(!args.includes("/stale-extension.ts"));
+			assert.ok(!args.includes("stale/model"));
+			await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`));
+		} finally {
+			if (previousPolicy === undefined) delete process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS;
+			else process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = previousPolicy;
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+			if (revivedId) fs.rmSync(path.join(ASYNC_DIR, revivedId), { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a trusted-seat resume descriptor with a normalized path alias", async () => {
+		const runId = `resume-trusted-seat-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const sessionFile = path.join(tempDir, "trusted-seat-child.jsonl");
+		const trustedPath = path.join(tempDir, "trusted-reviewer.md");
+		const descriptorAlias = `${tempDir}/nested/../trusted-reviewer.md`;
+		const previousPolicy = process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS;
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			fs.writeFileSync(trustedPath, "trusted", "utf-8");
+			fs.mkdirSync(path.join(tempDir, "nested"));
+			process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = JSON.stringify({ reviewer: trustedPath });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId, sessionId: "session-123", mode: "single", state: "paused", startedAt: 100, lastUpdate: 200, cwd: tempDir,
+				steps: [{ agent: "reviewer", status: "paused", sessionFile }],
+			}, null, 2), "utf-8");
+			fs.writeFileSync(path.join(asyncDir, "recovery-descriptor.json"), JSON.stringify({
+				version: 1,
+				sourceRunId: runId,
+				agent: "reviewer",
+				agentFilePath: descriptorAlias,
+				cwd: tempDir,
+				model: "anthropic/claude-sonnet-4:high",
+				tools: ["read"],
+				systemPrompt: "Untrusted persisted prompt",
+				systemPromptMode: "replace",
+				inheritProjectContext: false,
+				inheritSkills: false,
+				outputMode: "inline",
+				maxSubagentDepth: 1,
+				share: false,
+			}, null, 2), "utf-8");
+			const { executor } = makeExecutor({ agents: [makeAgent("reviewer", { filePath: trustedPath })] });
+			const callsBefore = mockPi.callCount();
+
+			const result = await executor.execute(
+				"resume-trusted-seat",
+				{ action: "resume", id: runId, message: "Continue safely." },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /Trusted agent 'reviewer' resolved to/);
+			assert.equal(mockPi.callCount(), callsBefore);
+		} finally {
+			if (previousPolicy === undefined) delete process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS;
+			else process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = previousPolicy;
 			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}
 	});

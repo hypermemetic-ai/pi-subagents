@@ -10,6 +10,7 @@ import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
 import { beginForegroundChild, finishForegroundChild, updateForegroundChild } from "./foreground-control.ts";
 import { resolveExecutionAgentScope } from "../../agents/agent-scope.ts";
+import { assertTrustedAgentPath, isTrustedAgentName } from "../../agents/agent-selection.ts";
 import { handleManagementAction } from "../../agents/agent-management.ts";
 import { buildDoctorReport } from "../../extension/doctor.ts";
 import { clearPendingForegroundControlNotices } from "../../extension/control-notices.ts";
@@ -1217,8 +1218,24 @@ async function resumeAsyncRun(input: {
 		? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 		: discoveredAgents;
 	const recoveryDescriptor = "recoveryDescriptor" in target ? target.recoveryDescriptor : undefined;
-	const discoveredAgentConfig = agents.find((agent) => agent.name === target.agent);
-	const agentConfig: AgentConfig | undefined = discoveredAgentConfig ?? (recoveryDescriptor ? {
+	let trustedSeat: boolean;
+	try {
+		trustedSeat = isTrustedAgentName(target.agent);
+		if (recoveryDescriptor) assertTrustedAgentPath(target.agent, recoveryDescriptor.agentFilePath);
+	} catch (error) {
+		return {
+			content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
+	}
+	const trustedAgentConfig = trustedSeat
+		? input.deps.discoverAgents(effectiveCwd, "both").agents
+			.map((agent) => intercomBridge.active ? applyIntercomBridgeToAgent(agent, intercomBridge) : agent)
+			.find((agent) => agent.name === target.agent)
+		: undefined;
+	const discoveredAgentConfig = trustedSeat ? trustedAgentConfig : agents.find((agent) => agent.name === target.agent);
+	const agentConfig: AgentConfig | undefined = discoveredAgentConfig ?? (!trustedSeat && recoveryDescriptor ? {
 		name: recoveryDescriptor.agent,
 		description: "Persisted async recovery contract",
 		systemPrompt: "",
@@ -1231,6 +1248,13 @@ async function resumeAsyncRun(input: {
 	if (!agentConfig) {
 		return {
 			content: [{ type: "text", text: `Unknown agent for resume: ${target.agent}` }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
+	}
+	if (agentConfig.trustedPathError) {
+		return {
+			content: [{ type: "text", text: agentConfig.trustedPathError }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
@@ -1349,8 +1373,8 @@ async function resumeAsyncRun(input: {
 			sourceRunId: target.runId,
 			...(input.deps.state.currentSessionId ? { parentSessionId: input.deps.state.currentSessionId } : {}),
 		},
-		modelOverride: input.params.model ?? recoveryDescriptor?.model ?? target.model,
-		thinkingOverride: input.params.model ? undefined : recoveryDescriptor?.thinking ?? target.thinking,
+		modelOverride: recoveryAgentConfig.trustedExecutionProfile ? undefined : input.params.model ?? recoveryDescriptor?.model ?? target.model,
+		thinkingOverride: recoveryAgentConfig.trustedExecutionProfile ? undefined : input.params.model ? undefined : recoveryDescriptor?.thinking ?? target.thinking,
 		outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
 		maxSubagentDepth: recoveryDescriptor?.maxSubagentDepth ?? resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
 		waitToolEnabled: input.deps.waitToolEnabled,
@@ -1487,6 +1511,20 @@ async function maybeBuildForegroundIntercomReceipt(input: {
 	};
 }
 
+function trustedAgentSelectionFailure(
+	agents: AgentConfig[],
+	agentName: string,
+	mode: "single" | "parallel" | "chain",
+): AgentToolResult<Details> | null {
+	const error = agents.find((agent) => agent.name === agentName)?.trustedPathError;
+	if (!error) return null;
+	return {
+		content: [{ type: "text", text: error }],
+		isError: true,
+		details: { mode, results: [] },
+	};
+}
+
 function validateExecutionInput(
 	params: SubagentParamsLike,
 	agents: AgentConfig[],
@@ -1524,6 +1562,10 @@ function validateExecutionInput(
 			details: { mode: "single" as const, results: [] },
 		};
 	}
+	if (hasSingle && params.agent) {
+		const trustedFailure = trustedAgentSelectionFailure(agents, params.agent, "single");
+		if (trustedFailure) return trustedFailure;
+	}
 
 	if (hasTasks && params.tasks) {
 		for (let i = 0; i < params.tasks.length; i++) {
@@ -1535,6 +1577,8 @@ function validateExecutionInput(
 					details: { mode: "parallel" as const, results: [] },
 				};
 			}
+			const trustedFailure = trustedAgentSelectionFailure(agents, task.agent, "parallel");
+			if (trustedFailure) return trustedFailure;
 		}
 	}
 
@@ -1580,6 +1624,8 @@ function validateExecutionInput(
 						details: { mode: "chain" as const, results: [] },
 					};
 				}
+				const trustedFailure = trustedAgentSelectionFailure(agents, agentName, "chain");
+				if (trustedFailure) return trustedFailure;
 			}
 			if (isParallelStep(step) && step.parallel.length === 0) {
 				return {

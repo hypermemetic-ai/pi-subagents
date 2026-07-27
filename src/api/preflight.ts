@@ -11,7 +11,7 @@ import { applyThinkingSuffix, resolvePiLaunchToolPlan, type PiLaunchToolPlan } f
 import { injectOutputPathSystemPrompt, normalizeSingleOutputOverride, resolveSingleOutputPath } from "../runs/shared/single-output.ts";
 import { getArtifactPaths, getArtifactsDir } from "../shared/artifacts.ts";
 import { resolveEffectiveThinking } from "../shared/model-info.ts";
-import { SUBAGENT_LIFECYCLE_ARTIFACT_VERSION, type ArtifactDirPreference, type ArtifactPaths, type JsonSchemaObject, type OutputMode } from "../shared/types.ts";
+import { SUBAGENT_LIFECYCLE_ARTIFACT_VERSION, type ArtifactDirPreference, type ArtifactPaths, type ExecutionProfileSelection, type JsonSchemaObject, type OutputMode } from "../shared/types.ts";
 import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../runs/shared/capability-ceiling.ts";
 import { appendTurnBudgetSystemPrompt } from "../runs/shared/turn-budget.ts";
 import type { ResolvedTurnBudget } from "../shared/types.ts";
@@ -31,7 +31,8 @@ export type SubagentLaunchContractReasonCode =
 	| "denied_required_tool"
 	| "invalid_artifact_dir"
 	| "invalid_cwd"
-	| "unsupported_mode";
+	| "unsupported_mode"
+	| "trusted_agent_violation";
 
 export interface SubagentLaunchContractDiagnostic {
 	code: SubagentLaunchContractReasonCode | "host_required" | "snapshot_warning";
@@ -139,6 +140,7 @@ export interface SubagentLaunchContract {
 	model?: string;
 	modelCandidates: string[];
 	thinking?: string;
+	executionProfile?: Readonly<ExecutionProfileSelection>;
 	systemPromptMode: AgentConfig["systemPromptMode"];
 	inheritProjectContext: boolean;
 	inheritSkills: boolean;
@@ -233,6 +235,14 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 		return { ok: false, code: "ambiguous_agent", message: `Ambiguous agent: ${input.agent}`, diagnostics };
 	}
 	const agent = matches[0]!;
+	if (agent.trustedPathError) {
+		return {
+			ok: false,
+			code: "trusted_agent_violation",
+			message: agent.trustedPathError,
+			diagnostics: [{ code: "trusted_agent_violation", severity: "error", message: agent.trustedPathError }],
+		};
+	}
 	const runId = input.runId ?? "preflight";
 	const skillInput = normalizeSkillInput(input.skill);
 	const outputOverride = normalizeSingleOutputOverride(input.output, agent.output);
@@ -262,6 +272,10 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 	const model = applyThinkingSuffix(primaryModel, effectiveThinkingConfig, input.thinking !== undefined);
 	const modelCandidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, { scope: discovered.modelScope })
 		.map((candidate) => applyThinkingSuffix(candidate, effectiveThinkingConfig, input.thinking !== undefined) ?? candidate);
+	if (agent.trustedExecutionProfile && model !== applyThinkingSuffix(agent.model, agent.thinking)) {
+		const message = `Trusted execution profile conflict for '${agent.name}': expected '${applyThinkingSuffix(agent.model, agent.thinking)}', received '${model ?? "none"}'.`;
+		return { ok: false, code: "trusted_agent_violation", message, diagnostics: [{ code: "trusted_agent_violation", severity: "error", message }] };
+	}
 	let toolPlan: PiLaunchToolPlan;
 	try {
 		toolPlan = resolvePiLaunchToolPlan({
@@ -329,6 +343,7 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 		...(model ? { model } : {}),
 		modelCandidates,
 		...(resolveEffectiveThinking(model, effectiveThinkingConfig) ? { thinking: resolveEffectiveThinking(model, effectiveThinkingConfig) } : {}),
+		...(agent.trustedExecutionProfile ? { executionProfile: { ...agent.trustedExecutionProfile } } : {}),
 		systemPromptMode: agent.systemPromptMode,
 		inheritProjectContext: agent.inheritProjectContext,
 		inheritSkills: agent.inheritSkills,
@@ -393,6 +408,7 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 			...(outputPath ? { outputPath } : {}),
 			outputMode: input.outputMode ?? "inline",
 			...(input.outputSchema ? { structuredOutputSchema: input.outputSchema } : {}),
+			...(agent.trustedExecutionProfile ? { executionProfile: agent.trustedExecutionProfile } : {}),
 		}),
 	};
 	return { ok: true, contract: { ...contractBase, digest: digestContract(contractBase) } };

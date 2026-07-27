@@ -41,10 +41,17 @@ describe("async chain root attachment", () => {
 			startedAt: 1,
 			steps: [{ agent: "worker", status: "complete", sessionFile }],
 		});
+		const executionProfile = {
+			provider: "kimi-coding",
+			model: "k3",
+			effort: "max",
+			serviceClass: "provider-default",
+			acknowledgedServiceClass: "default",
+		};
 		writeJson(importedRoot.resultPath, {
 			state: "complete",
 			success: true,
-			results: [{ agent: "worker", output: "root output", success: true, sessionFile }],
+			results: [{ agent: "worker", output: "root output", success: true, sessionFile, executionProfile }],
 		});
 
 		const result = await waitForImportedAsyncRoot(importedRoot, { pollIntervalMs: 1 });
@@ -54,11 +61,13 @@ describe("async chain root attachment", () => {
 			output: result.output,
 			exitCode: result.exitCode,
 			sessionFile: result.sessionFile,
+			executionProfile: result.executionProfile,
 		}, {
 			agent: "worker",
 			output: "root output",
 			exitCode: 0,
 			sessionFile,
+			executionProfile,
 		});
 	});
 

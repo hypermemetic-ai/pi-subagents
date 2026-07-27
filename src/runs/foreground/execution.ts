@@ -54,6 +54,7 @@ import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir, resolvePiLaunchToolPlan } from "../shared/pi-args.ts";
 import { decodeSubagentCapabilityCeiling, resolveCurrentSubagentCapabilityCeiling, SUBAGENT_CAPABILITY_CEILING_ENV } from "../shared/capability-ceiling.ts";
+import { combineExecutionProfileReceiptError, readExecutionProfileReceipt } from "../shared/execution-profile.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { MISSING_STRUCTURED_OUTPUT_CALL_ERROR, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
@@ -220,7 +221,14 @@ async function runSingleAttempt(
 			childIndex: options.index ?? 0,
 		})
 		: undefined;
-	const { args, env: sharedEnv, tempDir, toolDiagnosticPath, capabilityAudit } = buildPiArgs({
+	const {
+		args,
+		env: sharedEnv,
+		tempDir,
+		toolDiagnosticPath,
+		capabilityAudit,
+		executionProfileReceiptPath,
+	} = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
 		sessionEnabled: shared.sessionEnabled,
@@ -255,6 +263,7 @@ async function runSingleAttempt(
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
 		capabilityCeiling: options.capabilityCeiling,
+		trustedExecutionProfile: agent.trustedExecutionProfile,
 	});
 
 	const effectiveSystemPrompt = appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget);
@@ -286,6 +295,7 @@ async function runSingleAttempt(
 		...(options.outputPath ? { outputPath: options.outputPath } : {}),
 		outputMode: options.outputMode ?? "inline",
 		...(options.structuredOutput ? { structuredOutputSchema: options.structuredOutput.schema } : {}),
+		...(agent.trustedExecutionProfile ? { executionProfile: agent.trustedExecutionProfile } : {}),
 	});
 	const result: SingleResult = withRunContext({
 		agent: agent.name,
@@ -360,6 +370,7 @@ async function runSingleAttempt(
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
 	let structuredOutputToolInvoked = false;
+	let executionProfileReceiptError: string | undefined;
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
@@ -934,12 +945,21 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			const toolDiagnosticError = readChildToolDiagnosticError(toolDiagnosticPath);
+			try {
+				const receipt = readExecutionProfileReceipt(executionProfileReceiptPath, agent.trustedExecutionProfile);
+				if (receipt) result.executionProfile = receipt;
+			} catch (error) {
+				executionProfileReceiptError = error instanceof Error ? error.message : String(error);
+			}
 			cleanupTempDir(tempDir);
 			stdoutReader.end();
 			stderrReader.end();
 			const stderr = stderrTail.text();
 			let closeError = result.error ?? toolDiagnosticError ?? assistantError;
-			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && (cleanTerminalAssistantStopReceived || agentSettledReceived) && !closeError;
+			const forcedDrainAfterFinalSuccess = forcedTerminationSignal
+				&& (cleanTerminalAssistantStopReceived || agentSettledReceived)
+				&& !closeError
+				&& !executionProfileReceiptError;
 			if (code !== 0 && stderr.trim() && !closeError && !forcedDrainAfterFinalSuccess) {
 				closeError = stderr.trim();
 			}
@@ -947,7 +967,7 @@ async function runSingleAttempt(
 			if (detached) {
 				const recoveredProgress = snapshotProgress(progress);
 				const recoveredResult = snapshotResult(result, recoveredProgress);
-				if (!recoveredResult.error && closeError) recoveredResult.error = closeError;
+				recoveredResult.error = combineExecutionProfileReceiptError(recoveredResult.error ?? closeError, executionProfileReceiptError);
 				recoveredResult.exitCode = recoveredResult.error && finalCode === 0 ? 1 : finalCode;
 				recoveredProgress.status = recoveredResult.exitCode === 0 ? "completed" : "failed";
 				recoveredProgress.durationMs = Date.now() - startTime;
@@ -1119,6 +1139,8 @@ async function runSingleAttempt(
 			}
 		}
 	}
+	result.error = combineExecutionProfileReceiptError(result.error, executionProfileReceiptError);
+	if (result.error && result.exitCode === 0) result.exitCode = 1;
 
 	progress.status = result.exitCode === 0 ? "completed" : "failed";
 	progress.durationMs = Date.now() - startTime;
@@ -1353,6 +1375,7 @@ export async function runSync(
 			exitCode: target.exitCode,
 			usage: target.usage,
 			model: target.model,
+			executionProfile: target.executionProfile,
 			attemptedModels: target.attemptedModels,
 			modelAttempts: target.modelAttempts,
 			durationMs: target.progressSummary?.durationMs,

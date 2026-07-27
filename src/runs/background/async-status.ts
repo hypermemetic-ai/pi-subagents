@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
+import { formatExecutionProfile } from "../shared/execution-profile.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
 import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
 import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../shared/capability-ceiling.ts";
@@ -38,6 +39,7 @@ interface AsyncRunStepSummary {
 	skills?: string[];
 	model?: string;
 	thinking?: string;
+	executionProfile?: AsyncJobStep["executionProfile"];
 	attemptedModels?: string[];
 	sessionFile?: string;
 	transcriptPath?: string;
@@ -246,6 +248,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.skills ? { skills: step.skills } : {}),
 			...(step.model ? { model: step.model } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
+			...(step.executionProfile ? { executionProfile: { ...step.executionProfile } } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.transcriptPath ? { transcriptPath: step.transcriptPath } : {}),
@@ -427,8 +430,12 @@ function formatStepLine(step: AsyncRunStepSummary): string {
 	const parts = [`${step.index + 1}. ${phase}${display}${context ? ` ${context}` : ""}`, step.status];
 	const activity = formatActivityFacts(step);
 	if (activity) parts.push(activity);
-	const modelThinking = formatModelThinking(step.model, step.thinking);
-	if (modelThinking) parts.push(modelThinking);
+	const executionProfile = formatExecutionProfile(step.executionProfile);
+	if (executionProfile) parts.push(executionProfile);
+	else {
+		const modelThinking = formatModelThinking(step.model, step.thinking);
+		if (modelThinking) parts.push(modelThinking);
+	}
 	if (step.durationMs !== undefined) parts.push(formatDuration(step.durationMs));
 	if (step.tokens) parts.push(`${formatTokens(step.tokens.total)} tok`);
 	return parts.join(" | ");

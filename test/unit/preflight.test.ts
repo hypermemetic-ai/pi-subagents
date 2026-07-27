@@ -319,4 +319,73 @@ Project prompt.
 		assert.equal(result.code, "denied_required_tool");
 		assert.match(result.message, /excludes required tool 'read'/);
 	});
+
+	it("binds trusted seats and complete execution profiles into public preflight", async () => {
+		const cwd = path.join(tempDir, "trusted-repo");
+		const agentPath = path.join(cwd, ".pi", "agents", "trusted-worker.md");
+		writeAgent(agentPath, `---
+name: trusted-worker
+description: Trusted worker
+extensions:
+---
+Trusted prompt.
+`);
+		const trustedPathsBefore = process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS;
+		const trustedProfilesBefore = process.env.PI_SUBAGENT_TRUSTED_EXECUTION_PROFILES;
+		const profile = {
+			provider: "test",
+			model: "trusted",
+			effort: "high",
+			serviceClass: "default",
+		};
+		try {
+			process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = JSON.stringify({ "trusted-worker": agentPath });
+			process.env.PI_SUBAGENT_TRUSTED_EXECUTION_PROFILES = JSON.stringify({ "trusted-worker": profile });
+			const first = await resolveSubagentLaunchContract({
+				agent: "trusted-worker",
+				cwd,
+				task: "Return the trusted result",
+				availableModels: [{ provider: "test", id: "trusted", fullId: "test/trusted" }],
+			});
+			assert.equal(first.ok, true);
+			assert.equal(first.contract.model, "test/trusted:high");
+			assert.deepEqual(first.contract.modelCandidates, ["test/trusted:high"]);
+			assert.deepEqual(first.contract.executionProfile, profile);
+
+			for (const override of [{ model: "other/model" }, { thinking: "low" }]) {
+				const conflicting = await resolveSubagentLaunchContract({ agent: "trusted-worker", cwd, ...override });
+				assert.equal(conflicting.ok, false);
+				assert.equal(conflicting.code, "trusted_agent_violation");
+				assert.match(conflicting.message, /Trusted execution profile conflict/);
+			}
+
+			process.env.PI_SUBAGENT_TRUSTED_EXECUTION_PROFILES = JSON.stringify({
+				"trusted-worker": { ...profile, serviceClass: "priority" },
+			});
+			const changedClass = await resolveSubagentLaunchContract({
+				agent: "trusted-worker",
+				cwd,
+				task: "Return the trusted result",
+				availableModels: [{ provider: "test", id: "trusted", fullId: "test/trusted" }],
+			});
+			assert.equal(changedClass.ok, true);
+			assert.equal(changedClass.contract.agent.definitionDigest, first.contract.agent.definitionDigest);
+			assert.notEqual(changedClass.contract.launchContractDigest, first.contract.launchContractDigest);
+			assert.notEqual(changedClass.contract.digest, first.contract.digest);
+
+			const wrongPath = path.join(cwd, ".pi", "agents", "wrong.md");
+			writeAgent(wrongPath, `---\nname: other-worker\ndescription: Wrong seat\n---\nWrong prompt.\n`);
+			process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = JSON.stringify({ "trusted-worker": wrongPath });
+			const rejected = await resolveSubagentLaunchContract({ agent: "trusted-worker", cwd });
+			assert.equal(rejected.ok, false);
+			assert.equal(rejected.code, "trusted_agent_violation");
+			assert.match(rejected.message, /instead of/);
+		} finally {
+			if (trustedPathsBefore === undefined) delete process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS;
+			else process.env.PI_SUBAGENT_TRUSTED_AGENT_PATHS = trustedPathsBefore;
+			if (trustedProfilesBefore === undefined) delete process.env.PI_SUBAGENT_TRUSTED_EXECUTION_PROFILES;
+			else process.env.PI_SUBAGENT_TRUSTED_EXECUTION_PROFILES = trustedProfilesBefore;
+		}
+	});
+
 });

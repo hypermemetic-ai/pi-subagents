@@ -6,7 +6,7 @@ import { encodeNestedPathEnv, parseNestedPathEnv, type NestedPathEntry } from ".
 import { resolveMcpDirectToolSelections, type ResolvedMcpDirectToolSelection } from "./mcp-direct-tool-allowlist.ts";
 import { resolvePiPackageRoot } from "./pi-spawn.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "./structured-output.ts";
-import { TEMP_ROOT_DIR, type JsonSchemaObject, type ResolvedToolBudget } from "../../shared/types.ts";
+import { TEMP_ROOT_DIR, type ExecutionProfileSelection, type JsonSchemaObject, type ResolvedToolBudget } from "../../shared/types.ts";
 import { THINKING_LEVELS } from "../../shared/model-info.ts";
 import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
 import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, MCP_DIRECT_CHILD_TOOLS_ENV, REQUIRED_CHILD_TOOLS_ENV } from "./tool-availability.ts";
@@ -38,6 +38,8 @@ export const SUBAGENT_PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
 export const SUBAGENT_STEER_INBOX_ENV = "PI_SUBAGENT_STEER_INBOX";
 export const SUBAGENT_STEER_CAPABILITY_ENV = "PI_SUBAGENT_STEER_CAPABILITY";
 export const SUBAGENT_STEER_ACK_DIR_ENV = "PI_SUBAGENT_STEER_ACK_DIR";
+export const EXECUTION_PROFILE_RECEIPT_ENV = "PI_SUBAGENT_EXECUTION_PROFILE_RECEIPT";
+export const TRUSTED_EXECUTION_ROLE_ENV = "PI_SUBAGENT_TRUSTED_EXECUTION_ROLE";
 
 export interface BuildPiArgsInput {
 	parentSessionId?: string;
@@ -85,6 +87,7 @@ export interface BuildPiArgsInput {
 	childWatchdog?: ChildWatchdogConfig;
 	waitToolEnabled?: boolean;
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	trustedExecutionProfile?: Readonly<ExecutionProfileSelection>;
 }
 
 export interface BuildPiArgsResult {
@@ -93,6 +96,7 @@ export interface BuildPiArgsResult {
 	tempDir?: string;
 	toolDiagnosticPath?: string;
 	capabilityAudit?: SubagentCapabilityAudit;
+	executionProfileReceiptPath?: string;
 }
 
 function sanitizeSupervisorChannelSegment(value: string): string {
@@ -214,6 +218,15 @@ export function resolvePiLaunchToolPlan(input: ResolvePiLaunchToolPlanInput): Pi
 
 export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	const args = [...input.baseArgs];
+	if (input.trustedExecutionProfile) {
+		const profile = input.trustedExecutionProfile;
+		const expectedBase = `${profile.provider}/${profile.model}`;
+		const expectedModel = profile.effort === "provider-default" ? expectedBase : `${expectedBase}:${profile.effort}`;
+		const selectedModel = applyThinkingSuffix(input.model, input.thinking);
+		if (selectedModel !== expectedModel) {
+			throw new Error(`Trusted execution profile conflict for '${input.childAgentName ?? "unknown"}': expected '${expectedModel}', received '${selectedModel ?? "none"}'.`);
+		}
+	}
 
 	if (input.sessionFile) {
 		fs.mkdirSync(path.dirname(input.sessionFile), { recursive: true });
@@ -277,7 +290,10 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 		args.push(`Task: ${input.task}`);
 	}
 
-	const env: Record<string, string | undefined> = {};
+	const env: Record<string, string | undefined> = {
+		[EXECUTION_PROFILE_RECEIPT_ENV]: undefined,
+		[TRUSTED_EXECUTION_ROLE_ENV]: undefined,
+	};
 	const piPackageRoot = process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] ?? resolvePiPackageRoot();
 	if (piPackageRoot) env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] = piPackageRoot;
 	let toolDiagnosticPath: string | undefined;
@@ -375,7 +391,23 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 
 	env[SUBAGENT_PARENT_SESSION_ENV] = input.parentSessionId ?? process.env[SUBAGENT_PARENT_SESSION_ENV] ?? "";
 
-	return { args, env, tempDir, toolDiagnosticPath, capabilityAudit: toolPlan.capabilityAudit };
+	let executionProfileReceiptPath: string | undefined;
+	if (input.trustedExecutionProfile) {
+		if (!input.childAgentName) throw new Error("Trusted execution profile requires a child role assertion.");
+		if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
+		executionProfileReceiptPath = path.join(tempDir, "execution-profile-receipt.json");
+		env[EXECUTION_PROFILE_RECEIPT_ENV] = executionProfileReceiptPath;
+		env[TRUSTED_EXECUTION_ROLE_ENV] = input.childAgentName;
+	}
+
+	return {
+		args,
+		env,
+		tempDir,
+		toolDiagnosticPath,
+		capabilityAudit: toolPlan.capabilityAudit,
+		executionProfileReceiptPath,
+	};
 }
 
 export const parseParentPathEnv = parseNestedPathEnv;

@@ -615,8 +615,12 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				? [s.parallel.agent]
 				: [(s as SequentialStep).agent];
 		for (const agentName of stepAgents) {
-			if (!agents.find((x) => x.name === agentName)) {
+			const selected = agents.find((agent) => agent.name === agentName);
+			if (!selected) {
 				return { error: `Unknown agent: ${agentName}` };
+			}
+			if (selected.trustedPathError) {
+				return { error: selected.trustedPathError };
 			}
 		}
 	}
@@ -709,6 +713,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
+			...(a.trustedExecutionProfile ? { executionProfile: { ...a.trustedExecutionProfile } } : {}),
 			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
 				applyThinkingSuffix(candidate, effectiveThinking, thinkingOverride !== undefined),
 			),
@@ -1249,6 +1254,7 @@ export function executeAsyncSingle(
 		...(outputPath ? { outputPath } : {}),
 		outputMode,
 		...(params.structuredOutputSchema ? { structuredOutputSchema: params.structuredOutputSchema } : {}),
+		...(agentConfig.trustedExecutionProfile ? { executionProfile: agentConfig.trustedExecutionProfile } : {}),
 	});
 	const resolvedAcceptance = resolveEffectiveAcceptance({
 		explicit: params.acceptance,
@@ -1319,6 +1325,7 @@ export function executeAsyncSingle(
 						cwd: runnerCwd,
 						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),
+						...(agentConfig.trustedExecutionProfile ? { executionProfile: { ...agentConfig.trustedExecutionProfile } } : {}),
 						modelCandidates,
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,

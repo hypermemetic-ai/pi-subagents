@@ -152,6 +152,19 @@ describe("async status helpers", () => {
 					{ agent: "scout", status: "running", model: "anthropic/claude-haiku-4-5", thinking: "low" },
 					{ agent: "local", status: "running", model: "ollama/qwen2.5-coder:7b" },
 					{ agent: "fallback", status: "running", model: "anthropic/claude-sonnet-4-5:low", thinking: "high" },
+					{
+						agent: "observer",
+						status: "running",
+						model: "ignored/model",
+						executionProfile: {
+							provider: "kimi-coding",
+							model: "k3",
+							effort: "max",
+							serviceClass: "provider-default",
+							acknowledgedServiceClass: "default",
+							accountedServiceClass: "default",
+						},
+					},
 				],
 			});
 
@@ -160,6 +173,8 @@ describe("async status helpers", () => {
 			assert.match(text, /2\. scout \| running \| claude-haiku-4-5 · thinking low/);
 			assert.match(text, /3\. local \| running \| qwen2\.5-coder:7b(?! · thinking)/);
 			assert.match(text, /4\. fallback \| running \| claude-sonnet-4-5 · thinking low/);
+			assert.match(text, /5\. observer \| running \| kimi-coding\/k3 • max • service provider-default → default/);
+			assert.doesNotMatch(text, /ignored\/model/);
 			assert.doesNotMatch(text, /openai-codex\/gpt-5\.5/);
 			assert.doesNotMatch(text, /gpt-5\.5:high/);
 		} finally {
