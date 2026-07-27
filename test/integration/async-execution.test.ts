@@ -51,7 +51,7 @@ interface AsyncResultPayload {
 	wrapUpRequested?: boolean;
 	totalTokens?: { input: number; output: number; total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
-	results: Array<{ agent?: string; launchContractDigest?: string; output?: string; success?: boolean; error?: string; protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number }; timedOut?: boolean; stopped?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; agentContract?: { version: 1 }; execution?: { status?: string; success?: boolean; exitCode?: number }; effects?: { fileMutation?: { status?: string; expected?: boolean; attempted?: boolean } }; intercomTarget?: string; acceptance?: { status?: string; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> }; artifactPaths?: { outputPath?: string; inputPath?: string; metadataPath?: string }; capabilityCeiling?: { version?: number; allowedTools?: string[]; denyExtensions?: boolean; sources?: string[] }; capabilityAudit?: { effectiveTools?: string[]; removedTools?: string[]; extensionsDenied?: boolean } }>;
+	results: Array<{ agent?: string; launchContractDigest?: string; output?: string; success?: boolean; error?: string; protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number }; timedOut?: boolean; stopped?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; executionProfile?: { provider?: string; model?: string; effort?: string; serviceClass?: string; acknowledgedServiceClass?: string }; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; agentContract?: { version: 1 }; execution?: { status?: string; success?: boolean; exitCode?: number }; effects?: { fileMutation?: { status?: string; expected?: boolean; attempted?: boolean } }; intercomTarget?: string; acceptance?: { status?: string; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> }; artifactPaths?: { outputPath?: string; inputPath?: string; metadataPath?: string }; capabilityCeiling?: { version?: number; allowedTools?: string[]; denyExtensions?: boolean; sources?: string[] }; capabilityAudit?: { effectiveTools?: string[]; removedTools?: string[]; extensionsDenied?: boolean } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; acceptanceStatus?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; acceptanceStatus?: string; error?: string }> }> };
 	parallelHandoff?: { version?: number; path?: string; groupCount?: number; childCount?: number; changedPatches?: number; cleanupState?: string };
@@ -96,6 +96,7 @@ interface AsyncStatusPayload {
 		error?: string;
 		model?: string;
 		thinking?: string;
+		executionProfile?: { provider: string; model: string; effort: string; serviceClass: string; acknowledgedServiceClass?: string; accountedServiceClass?: string };
 		tokens?: { total: number };
 		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		agentContract?: { version: 1 };
@@ -669,6 +670,66 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.results[0]?.output, "OK");
 	});
 
+	it("publishes trusted execution-profile telemetry only after validating the child receipt", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		const receipt = { ...profile, acknowledgedServiceClass: "default", accountedServiceClass: "default" };
+		const releasePath = path.join(tempDir, "release-profiled-async");
+		mockPi.onCall({ waitForPath: releasePath, output: "profiled async done", executionProfileReceipt: receipt });
+		const id = `async-profile-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "observer",
+			task: "Observe",
+			agentConfig: makeAgent("observer", {
+				model: "kimi-coding/k3",
+				thinking: "max",
+				fallbackModels: [],
+				trustedExecutionProfile: profile,
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			acceptance: false,
+		});
+
+		await waitForMockPiCall(mockPi, 0);
+		const pendingStatus = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(pendingStatus.steps?.[0]?.executionProfile, undefined);
+		fs.writeFileSync(releasePath, "release", "utf-8");
+		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, true);
+		assert.deepEqual(payload.results[0]?.executionProfile, receipt);
+		assert.deepEqual(status.steps?.[0]?.executionProfile, receipt);
+	});
+
+	it("does not publish trusted execution-profile telemetry when the child omits its receipt", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const profile = { provider: "kimi-coding", model: "k3", effort: "max", serviceClass: "provider-default" } as const;
+		mockPi.onCall({ output: "receipt omitted" });
+		const id = `async-profile-missing-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "observer",
+			task: "Observe",
+			agentConfig: makeAgent("observer", {
+				model: "kimi-coding/k3",
+				thinking: "max",
+				fallbackModels: [],
+				trustedExecutionProfile: profile,
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			acceptance: false,
+		});
+
+		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, false);
+		assert.equal(payload.results[0]?.executionProfile, undefined);
+		assert.equal(status.steps?.[0]?.executionProfile, undefined);
+	});
+
 	it("spawns the async runner with node when process.execPath is not node", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		const originalExecPath = process.execPath;
 		process.execPath = path.join(tempDir, process.platform === "win32" ? "pi.exe" : "pi");
@@ -961,7 +1022,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			turnBudget: { maxTurns: 1, graceTurns: 1 },
 		});
 
-		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const resultPath = await waitForAsyncResultFile(id, 5_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.success, true);
@@ -2054,7 +2115,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			timeoutMs: 1_000,
 		});
 
-		const resultPath = await waitForAsyncResultFile(id, 5_000);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
 		const elapsedMs = Date.now() - startedAt;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
@@ -3030,15 +3091,22 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(statusPayload.steps?.[0]?.effects?.fileMutation?.status, "missing");
 	});
 
-	it("background single runs support outputSchema", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
-		mockPi.onCall({ output: "structured", structuredOutput: { ok: true, note: "async" } });
+	it("background single recovers an earlier tool error with structured output and persists its recovery contract", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "permission denied", true)],
+			structuredOutput: { ok: true, note: "async" },
+		});
 		const id = `async-single-schema-${Date.now().toString(36)}`;
+		const outputPath = path.join(tempDir, "async-structured-result.md");
+		const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, note: { type: "string" } } };
+		const acceptance = { level: "none" as const, reason: "test contract" };
 
 		executeAsyncSingle(id, {
 			agent: "worker",
 			task: "Return structured data",
 			agentConfig: makeAgent("worker", { completionGuard: false }),
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			cwd: tempDir,
 			artifactConfig: {
 				enabled: false,
 				includeInput: false,
@@ -3050,9 +3118,21 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			shareEnabled: false,
 			sessionRoot: path.join(tempDir, "sessions"),
 			maxSubagentDepth: 2,
-			acceptance: false,
-			structuredOutputSchema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, note: { type: "string" } } },
+			acceptance,
+			structuredOutputSchema: schema,
+			output: outputPath,
+			outputMode: "inline",
+			timeoutMs: 60_000,
 		});
+
+		const descriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "recovery-descriptor.json"), "utf-8"));
+		assert.equal(descriptor.agent, "worker");
+		assert.equal(descriptor.cwd, tempDir);
+		assert.deepEqual(descriptor.structuredOutputSchema, schema);
+		assert.deepEqual(descriptor.acceptance, acceptance);
+		assert.equal(descriptor.outputPath, outputPath);
+		assert.equal(descriptor.outputMode, "inline");
+		assert.ok(descriptor.absoluteDeadlineAt > Date.now());
 
 		const payload = JSON.parse(fs.readFileSync(await waitForAsyncResultFile(id, 10_000), "utf-8")) as AsyncResultPayload;
 		assert.equal(payload.success, true);

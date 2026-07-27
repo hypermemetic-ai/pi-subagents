@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import type { AgentConfig } from "../agents/agents.ts";
+import type { ExecutionProfileSelection } from "./types.ts";
 
 export const AGENT_DEFINITION_PROJECTION_VERSION = 1 as const;
-export const LAUNCH_BINDING_PROJECTION_VERSION = 1 as const;
+export const LAUNCH_BINDING_PROJECTION_VERSION = 2 as const;
 
 function stableJson(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -91,6 +92,7 @@ export interface LaunchBindingInput {
 	outputPath?: string;
 	outputMode?: string;
 	structuredOutputSchema?: unknown;
+	executionProfile?: Readonly<ExecutionProfileSelection>;
 }
 
 /** Canonical projection of the resolved inputs handed to the child. */
@@ -115,6 +117,7 @@ export function projectLaunchBinding(input: LaunchBindingInput): Record<string, 
 		outputPath: input.outputPath,
 		outputMode: input.outputMode,
 		structuredOutputSchema: input.structuredOutputSchema,
+		executionProfile: input.executionProfile,
 	};
 }
 

@@ -197,6 +197,42 @@ describe("detectSubagentError", { skip: !available ? "utils not importable" : un
 			"tool-call assistant message without text is not a recovery");
 	});
 
+	it("treats a successful structured_output result as recovery", () => {
+		const messages = [
+			toolResult("bash", "permission denied: /etc/shadow", true),
+			assistantToolCall("structured_output"),
+			toolResult("structured_output", "Structured output captured."),
+		];
+		const result = detectSubagentError(messages);
+		assert.equal(result.hasError, false,
+			"successful terminal structured output should supersede an earlier recovered error");
+	});
+
+	it("does not treat a failed structured_output result as recovery", () => {
+		const messages = [
+			toolResult("bash", "permission denied: /etc/shadow", true),
+			assistantToolCall("structured_output"),
+			toolResult("structured_output", "Structured output validation failed", true),
+		];
+		const result = detectSubagentError(messages);
+		assert.equal(result.hasError, true,
+			"failed structured output must remain terminal");
+		assert.equal(result.errorType, "structured_output");
+	});
+
+	it("detects errors after successful structured_output", () => {
+		const messages = [
+			toolResult("bash", "permission denied: /etc/shadow", true),
+			assistantToolCall("structured_output"),
+			toolResult("structured_output", "Structured output captured."),
+			toolResult("read", "provider unavailable", true),
+		];
+		const result = detectSubagentError(messages);
+		assert.equal(result.hasError, true,
+			"a later error must not be hidden by successful structured output");
+		assert.equal(result.errorType, "read");
+	});
+
 	it("does not treat empty/whitespace assistant message as recovery", () => {
 		const messages = [
 			toolResult("read", "EISDIR: illegal operation on a directory", true),

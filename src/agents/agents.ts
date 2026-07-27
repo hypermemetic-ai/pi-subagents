@@ -8,7 +8,7 @@ import { parse as parseYaml } from "yaml";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceInput, AcceptanceRole, OutputMode, ToolBudgetConfig, TurnBudgetConfig } from "../shared/types.ts";
+import type { AcceptanceInput, AcceptanceRole, ExecutionProfileSelection, OutputMode, ToolBudgetConfig, TurnBudgetConfig } from "../shared/types.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain, parseJsonChain } from "./chain-serializer.ts";
@@ -150,6 +150,10 @@ export interface AgentConfig {
 	extraFields?: Record<string, string>;
 	override?: BuiltinAgentOverrideInfo;
 	modelSource?: AgentModelSourceInfo;
+	/** Set only from the opt-in trusted execution-profile map after exact trusted-path validation. */
+	trustedExecutionProfile?: Readonly<ExecutionProfileSelection>;
+	/** Set only by opt-in trusted-path discovery when this selected definition cannot occupy its reserved name. */
+	trustedPathError?: string;
 }
 
 interface SubagentSettings {

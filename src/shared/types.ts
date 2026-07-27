@@ -756,6 +756,18 @@ export interface ProtocolOutputLimit {
 	diagnosticTail: string;
 }
 
+export interface ExecutionProfileSelection {
+	provider: string;
+	model: string;
+	effort: string;
+	serviceClass: string;
+}
+
+export interface ExecutionProfileTelemetry extends ExecutionProfileSelection {
+	acknowledgedServiceClass?: string;
+	accountedServiceClass?: string;
+}
+
 export interface SingleResult {
 	agent: string;
 	task: string;
@@ -777,6 +789,8 @@ export interface SingleResult {
 	model?: string;
 	/** Effective thinking level used by this foreground child, when known. */
 	thinking?: string;
+	/** Trusted request selection plus provider acknowledgement reported by the child runtime. */
+	executionProfile?: ExecutionProfileTelemetry;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	controlEvents?: ControlEvent[];
@@ -1114,6 +1128,7 @@ export interface AsyncStatus {
 		skills?: string[];
 		model?: string;
 		thinking?: string;
+		executionProfile?: ExecutionProfileTelemetry;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
 		totalCost?: CostSummary;

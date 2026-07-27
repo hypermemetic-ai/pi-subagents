@@ -18,6 +18,7 @@ import {
 	type AsyncStatus,
 	type ChainOutputMap,
 	type CostSummary,
+	type ExecutionProfileTelemetry,
 	type ModelAttempt,
 	type NestedRouteInfo,
 	type NestedRunSummary,
@@ -59,6 +60,7 @@ import {
 	Semaphore,
 } from "../shared/parallel-utils.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir, resolvePiLaunchToolPlan } from "../shared/pi-args.ts";
+import { readExecutionProfileReceipt } from "../shared/execution-profile.ts";
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
@@ -180,6 +182,7 @@ interface StepResult {
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
+	executionProfile?: ExecutionProfileTelemetry;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	totalCost?: CostSummary;
@@ -996,6 +999,7 @@ async function runSingleStep(
 	exitCode: number | null;
 	error?: string;
 	model?: string;
+	executionProfile?: ExecutionProfileTelemetry;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
@@ -1075,6 +1079,7 @@ async function runSingleStep(
 				sessionFile: imported.sessionFile,
 				intercomTarget: imported.intercomTarget,
 				model: imported.model,
+				executionProfile: imported.executionProfile,
 				attemptedModels: imported.attemptedModels,
 				modelAttempts: imported.modelAttempts,
 				totalCost: imported.totalCost,
@@ -1166,7 +1171,14 @@ async function runSingleStep(
 				childIndex: ctx.flatIndex,
 			})
 			: undefined;
-		const { args, env, tempDir, toolDiagnosticPath, capabilityAudit: attemptCapabilityAudit } = buildPiArgs({
+		const {
+			args,
+			env,
+			tempDir,
+			toolDiagnosticPath,
+			capabilityAudit: attemptCapabilityAudit,
+			executionProfileReceiptPath,
+		} = buildPiArgs({
 			parentSessionId: step.parentSessionId,
 			baseArgs: ["--mode", "json", "-p"],
 			task,
@@ -1202,6 +1214,7 @@ async function runSingleStep(
 			toolBudget: step.toolBudget,
 			childWatchdog,
 			waitToolEnabled: step.waitToolEnabled,
+			trustedExecutionProfile: step.executionProfile,
 		});
 		if (step.definitionDigest) {
 			const toolPlan = resolvePiLaunchToolPlan({
@@ -1232,6 +1245,7 @@ async function runSingleStep(
 				...(step.outputPath ? { outputPath: step.outputPath } : {}),
 				...(step.outputMode ? { outputMode: step.outputMode } : {}),
 				...(step.structuredOutputSchema ? { structuredOutputSchema: step.structuredOutputSchema } : {}),
+				...(step.executionProfile ? { executionProfile: step.executionProfile } : {}),
 			});
 		}
 		capabilityAudit = attemptCapabilityAudit;
@@ -1287,15 +1301,23 @@ async function runSingleStep(
 		const toolAvailabilityError = run.exitCode === 0 && !run.error
 			? readChildToolDiagnosticError(toolDiagnosticPath)
 			: undefined;
+		let executionProfileReceipt: ExecutionProfileTelemetry | undefined;
+		let executionProfileReceiptError: string | undefined;
+		try {
+			executionProfileReceipt = readExecutionProfileReceipt(executionProfileReceiptPath, step.executionProfile);
+		} catch (error) {
+			executionProfileReceiptError = error instanceof Error ? error.message : String(error);
+		}
 		cleanupTempDir(tempDir);
 
-		const hiddenError = run.exitCode === 0 && !run.error && !toolAvailabilityError ? detectSubagentError(run.messages) : null;
+		const hiddenError = run.exitCode === 0 && !run.error && !toolAvailabilityError && !executionProfileReceiptError ? detectSubagentError(run.messages) : null;
 		const missingStructuredOutput = effectiveStructuredOutput
 			? !fs.existsSync(effectiveStructuredOutput.outputPath)
 			: false;
 		const emptyOutputError = run.exitCode === 0
 			&& !run.error
 			&& !toolAvailabilityError
+			&& !executionProfileReceiptError
 			&& !run.finalOutput.trim()
 			&& (!effectiveStructuredOutput || missingStructuredOutput)
 			&& (!hiddenError?.hasError || hasEmptyTerminalAssistantResponse(run.messages))
@@ -1303,7 +1325,7 @@ async function runSingleStep(
 			: undefined;
 		let structuredOutput: unknown;
 		let structuredError: string | undefined;
-		if (effectiveStructuredOutput && run.exitCode === 0 && !run.error && !toolAvailabilityError && !hiddenError?.hasError && !emptyOutputError) {
+		if (effectiveStructuredOutput && run.exitCode === 0 && !run.error && !toolAvailabilityError && !executionProfileReceiptError && !hiddenError?.hasError && !emptyOutputError) {
 			const structured = await readStructuredOutput({
 				schema: effectiveStructuredOutput.schema,
 				schemaPath: effectiveStructuredOutput.schemaPath,
@@ -1313,7 +1335,7 @@ async function runSingleStep(
 			else structuredOutput = structured.value;
 		}
 		const completionGuardEnabled = isAgentContractV1(step.agentContract) ? step.completionGuard === true : step.completionGuard !== false;
-		const completionGuard = run.exitCode === 0 && !run.error && !toolAvailabilityError && !hiddenError?.hasError && !emptyOutputError && completionGuardEnabled
+		const completionGuard = run.exitCode === 0 && !run.error && !toolAvailabilityError && !executionProfileReceiptError && !hiddenError?.hasError && !emptyOutputError && completionGuardEnabled
 			? evaluateCompletionMutationGuard({
 				agent: step.agent,
 				task: taskForCompletionGuard,
@@ -1334,7 +1356,7 @@ async function runSingleStep(
 		const completionGuardError = completionGuardTriggered && !isAgentContractV1(step.agentContract)
 			? "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes."
 			: undefined;
-		const effectiveExitCode = toolAvailabilityError || (completionGuardTriggered && !isAgentContractV1(step.agentContract)) || structuredError || emptyOutputError
+		const effectiveExitCode = toolAvailabilityError || executionProfileReceiptError || (completionGuardTriggered && !isAgentContractV1(step.agentContract)) || structuredError || emptyOutputError
 			? 1
 			: hiddenError?.hasError
 				? (hiddenError.exitCode ?? 1)
@@ -1342,6 +1364,7 @@ async function runSingleStep(
 					? 1
 					: run.exitCode;
 		const error = toolAvailabilityError
+			?? executionProfileReceiptError
 			?? completionGuardError
 			?? structuredError
 			?? emptyOutputError
@@ -1367,7 +1390,21 @@ async function runSingleStep(
 			toolBudgetBlocked = Boolean(blockedMessage);
 			toolBudget = toolBudgetState(step.toolBudget, toolMessages.length, blockedMessage ? (blockedMessage as { toolName?: string }).toolName : undefined);
 		}
-		finalResult = { ...run, exitCode: effectiveExitCode, model: candidate ?? run.model, error, structuredOutput, ...(step.agentContract ? { agentContract: step.agentContract } : {}), ...(fileMutationEffect ? { effects: { fileMutation: fileMutationEffect } } : {}) } as RunPiStreamingResult & { structuredOutput?: unknown; agentContract?: import("../../shared/types.ts").AgentContract; effects?: import("../../shared/types.ts").EffectsProjection };
+		finalResult = {
+			...run,
+			exitCode: effectiveExitCode,
+			model: candidate ?? run.model,
+			error,
+			structuredOutput,
+			...(executionProfileReceipt ? { executionProfile: executionProfileReceipt } : {}),
+			...(step.agentContract ? { agentContract: step.agentContract } : {}),
+			...(fileMutationEffect ? { effects: { fileMutation: fileMutationEffect } } : {}),
+		} as RunPiStreamingResult & {
+			structuredOutput?: unknown;
+			executionProfile?: ExecutionProfileTelemetry;
+			agentContract?: import("../../shared/types.ts").AgentContract;
+			effects?: import("../../shared/types.ts").EffectsProjection;
+		};
 		if (run.turnBudgetExceeded) break;
 		if (run.stopped || run.timedOut || ctx.timeoutSignal?.aborted || ctx.stopSignal?.aborted || ctx.skipAcceptance?.()) break;
 		if (attempt.success || completionGuardTriggered) break;
@@ -1467,6 +1504,7 @@ async function runSingleStep(
 					task,
 					exitCode: effectiveFinalExitCode,
 					model: finalResult?.model,
+					executionProfile: (finalResult as (RunPiStreamingResult & { executionProfile?: ExecutionProfileTelemetry }) | undefined)?.executionProfile,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
 					error: effectiveFinalError,
@@ -1495,6 +1533,7 @@ async function runSingleStep(
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
 		model: finalResult?.model,
+		executionProfile: (finalResult as (RunPiStreamingResult & { executionProfile?: ExecutionProfileTelemetry }) | undefined)?.executionProfile,
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
 		totalCost: costSummaryFromAttempts(modelAttempts),
@@ -3077,6 +3116,7 @@ async function runSubagent(
 				if (singleResult.wrapUpRequested) statusPayload.wrapUpRequested = true;
 				statusPayload.steps[fi].model = singleResult.model;
 				statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
+				statusPayload.steps[fi].executionProfile = singleResult.executionProfile;
 				statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 				statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
 				statusPayload.steps[fi].totalCost = singleResult.totalCost;
@@ -3133,6 +3173,7 @@ async function runSubagent(
 					sessionFile: pr.sessionFile,
 					intercomTarget: pr.intercomTarget,
 					model: pr.model,
+					executionProfile: pr.executionProfile,
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
 					totalCost: pr.totalCost,
@@ -3418,6 +3459,7 @@ async function runSubagent(
 						if (singleResult.wrapUpRequested) statusPayload.wrapUpRequested = true;
 						statusPayload.steps[fi].model = singleResult.model;
 						statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
+						statusPayload.steps[fi].executionProfile = singleResult.executionProfile;
 						statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 						statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
 						statusPayload.steps[fi].totalCost = singleResult.totalCost;
@@ -3509,6 +3551,7 @@ async function runSubagent(
 						sessionFile: pr.sessionFile,
 						intercomTarget: pr.intercomTarget,
 						model: pr.model,
+						executionProfile: pr.executionProfile,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
 						totalCost: pr.totalCost,
@@ -3542,6 +3585,7 @@ async function runSubagent(
 						exitCode: r.exitCode,
 						error: r.error,
 						model: r.model,
+						executionProfile: r.executionProfile,
 						attemptedModels: r.attemptedModels,
 					})),
 				);
@@ -3676,6 +3720,7 @@ async function runSubagent(
 				sessionFile: singleResult.sessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
+				executionProfile: singleResult.executionProfile,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
 				totalCost: singleResult.totalCost,
@@ -3751,6 +3796,7 @@ async function runSubagent(
 			if (singleResult.wrapUpRequested) statusPayload.wrapUpRequested = true;
 			statusPayload.steps[flatIndex].model = singleResult.model;
 			statusPayload.steps[flatIndex].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[flatIndex].thinking);
+			statusPayload.steps[flatIndex].executionProfile = singleResult.executionProfile;
 			statusPayload.steps[flatIndex].attemptedModels = singleResult.attemptedModels;
 			statusPayload.steps[flatIndex].modelAttempts = singleResult.modelAttempts;
 			statusPayload.steps[flatIndex].totalCost = singleResult.totalCost;
@@ -3991,6 +4037,7 @@ async function runSubagent(
 				sessionFile: r.sessionFile,
 				intercomTarget: r.intercomTarget,
 				model: r.model,
+				executionProfile: r.executionProfile,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
 				totalCost: r.totalCost,

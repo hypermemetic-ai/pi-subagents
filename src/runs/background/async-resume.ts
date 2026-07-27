@@ -497,6 +497,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 }
 
 export function applySteeringRecoveryAgentConfig(agentConfig: AgentConfig, descriptor: SteeringRecoveryDescriptor): AgentConfig {
+	if (agentConfig.trustedExecutionProfile) return { ...agentConfig };
 	return {
 		...agentConfig,
 		model: descriptor.model,
